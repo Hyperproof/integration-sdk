@@ -1,6 +1,6 @@
 {
   "name": "@hyperproof/integration-sdk",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Hyperproof Integration SDK",
   "repository": {
     "type": "git",
