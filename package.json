@@ -1,6 +1,6 @@
 {
   "name": "@hyperproof/integration-sdk",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Hyperproof Integration SDK",
   "repository": {
     "type": "git",
@@ -13,7 +13,7 @@
     "lint": "./node_modules/eslint/bin/eslint.js src/**/*.ts"
   },
   "engines": {
-    "node": "16"
+    "node": "^16.19.1 || ^18.17.1"
   },
   "dependencies": {
     "express": "4.17.1",
