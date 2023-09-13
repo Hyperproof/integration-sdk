@@ -1,6 +1,8 @@
 import express from 'express';
 import Superagent from 'superagent';
+
 import { debug, FusebitContext } from '../add-on-sdk';
+import { ErrorName, RefreshTokenError } from '../errors';
 
 /**
  * Response to a request for an access token.
@@ -544,18 +546,20 @@ export class OAuthConnector {
           ) {
             debug('REFRESH TOKEN ERROR, DELETING USER', e);
             await this.deleteUser(fusebitContext, userContext.vendorUserId);
-            throw new Error(
-              `Error refreshing access token. Maximum number of attempts exceeded, user has been deleted: ${e.message}`
-            );
+            throw new RefreshTokenError({
+              name: ErrorName.REFRESH_TOKEN_ATTEMPTS_EXHAUSTED,
+              message: `Error refreshing access token. Maximum number of attempts exceeded, user has been deleted: ${e.message}`
+            });
           } else {
             userContext.refreshErrorCount =
               (userContext.refreshErrorCount || 0) + 1;
             userContext.status = 'refresh_error';
             userContext.lastRefreshError = e.message;
             await this.saveUser(fusebitContext, userContext);
-            throw new Error(
-              `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`
-            );
+            throw new RefreshTokenError({
+              name: ErrorName.REFRESH_TOKEN_ATTEMP_FAILED,
+              message: `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`
+            });
           }
         }
       }
