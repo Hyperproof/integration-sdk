@@ -1,7 +1,9 @@
-import express from 'express';
-import { createSettingsManager, debug } from '../add-on-sdk';
 import createConfigure from './configure';
 import { OAuthConnector } from './OAuthConnector';
+
+import express from 'express';
+
+import { createSettingsManager, debug } from '../add-on-sdk';
 
 const httpError = (res: express.Response, status: number, message: string) => {
   res.status(status);

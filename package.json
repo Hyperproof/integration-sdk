@@ -1,6 +1,6 @@
 {
   "name": "@hyperproof/integration-sdk",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "Hyperproof Integration SDK",
   "repository": {
     "type": "git",
@@ -16,12 +16,28 @@
     "node": "^16.19.1 || ^18.17.1"
   },
   "dependencies": {
+    "@js-joda/core": "3.2.0",
+    "@pollyjs/adapter-node-http": "6.0.6",
+    "@pollyjs/core": "6.0.6",
+    "@pollyjs/persister-fs": "6.0.6",
+    "abort-controller": "3.0.0",
+    "body-parser": "^1.20.1",
     "express": "4.17.1",
+    "form-data": "3.0.0",
+    "html-entities": "2.3.6",
+    "http-errors": "1.8.0",
+    "http-status-codes": "2.1.4",
+    "jsonwebtoken": "9.0.2",
+    "mime": "3.0.0",
     "mock-http": "1.1.0",
-    "superagent": "^6.1.0"
+    "node-fetch": "2.6.7",
+    "query-string": "7.0.0",
+    "superagent": "^6.1.0",
+    "xss": "1.0.13"
   },
   "devDependencies": {
     "@types/express": "^4.17.13",
+    "@types/node-fetch": "2.6.2",
     "@types/superagent": "^4.1.15",
     "@typescript-eslint/eslint-plugin": "^5.25.0",
     "@typescript-eslint/parser": "^5.25.0",

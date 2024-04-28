@@ -1,8 +1,11 @@
 import express from 'express';
+import createHttpError from 'http-errors';
+import { StatusCodes } from 'http-status-codes';
 import Superagent from 'superagent';
 
-import { debug, FusebitContext } from '../add-on-sdk';
-import { ErrorName, RefreshTokenError } from '../errors';
+import { IntegrationContext } from '../add-on-sdk';
+import { Logger } from '../hyperproof-api';
+import { LogContextKey } from '../models';
 
 /**
  * Response to a request for an access token.
@@ -101,11 +104,11 @@ export class OAuthConnector {
   /**
    * Called when the entire connector is being deleted. Override the logic in this method to remove
    * any artifacts created during the lifetime of this connector (e.g. Fusebit functions, storage).
-   * @param {FusebitContext} fusebitContext The Fusebit context
+   * @param {IntegrationContext} integrationContext The integration context
    */
-  async onDelete(fusebitContext: FusebitContext) {
+  async onDelete(integrationContext: IntegrationContext) {
     // Clean up storage and vendor artifacts
-    await fusebitContext.storage.delete(undefined, true);
+    await integrationContext.storage.delete(undefined, true);
   }
 
   /**
@@ -158,12 +161,10 @@ export class OAuthConnector {
         }
         throw new Error('Caller does not have sufficient permissions.');
       } catch (e: any) {
-        debug(
-          'FAILED AUTHORIZATION CHECK',
-          e.message,
-          action,
-          resource,
-          req.fusebit.caller.permissions
+        await Logger.debug(
+          `FAILED AUTHORIZATION CHECK, message: ${e.message}, 
+          action: ${action}, resource: ${resource}, 
+          permissions: ${req.fusebit.caller.permissions}`
         );
         res
           .status(403)
@@ -175,55 +176,55 @@ export class OAuthConnector {
 
   /**
    * Creates the fully formed web authorization URL to start the authorization flow.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {string} state The value of the OAuth state parameter.
    * @param {string} redirectUri The callback URL to redirect to after the authorization flow.
    */
   async getAuthorizationUrl(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     state: string,
     redirectUri: string
   ) {
     return [
-      fusebitContext.configuration.vendor_oauth_authorization_url,
+      integrationContext.configuration.oauth_authorization_url,
       `?response_type=code`,
       `&scope=${encodeURIComponent(
-        fusebitContext.configuration.vendor_oauth_scope
+        integrationContext.configuration.oauth_scope
       )}`,
       `&state=${state}`,
-      `&client_id=${fusebitContext.configuration.vendor_oauth_client_id}`,
+      `&client_id=${integrationContext.configuration.oauth_client_id}`,
       `&redirect_uri=${encodeURIComponent(redirectUri)}`,
-      fusebitContext.configuration.vendor_oauth_audience
+      integrationContext.configuration.oauth_audience
         ? `&audience=${encodeURIComponent(
-            fusebitContext.configuration.vendor_oauth_audience
+            integrationContext.configuration.oauth_audience
           )}`
         : undefined,
-      fusebitContext.configuration.vendor_oauth_extra_params
-        ? `&${fusebitContext.configuration.vendor_oauth_extra_params}`
+      integrationContext.configuration.oauth_extra_params
+        ? `&${integrationContext.configuration.oauth_extra_params}`
         : undefined
     ].join('');
   }
 
   /**
    * Exchanges the OAuth authorization code for the access and refresh tokens.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {string} authorizationCode The authorization_code supplied to the OAuth callback upon successful authorization flow.
    * @param {string} redirectUri The redirect_uri value Fusebit used to start the authorization flow.
    */
   async getAccessToken(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     authorizationCode: string,
     redirectUri: string
   ) {
     const response = await Superagent.post(
-      fusebitContext.configuration.vendor_oauth_token_url
+      integrationContext.configuration.oauth_token_url
     )
       .type('form')
       .send({
         grant_type: 'authorization_code',
         code: authorizationCode,
-        client_id: fusebitContext.configuration.vendor_oauth_client_id,
-        client_secret: fusebitContext.configuration.vendor_oauth_client_secret,
+        client_id: integrationContext.configuration.oauth_client_id,
+        client_secret: integrationContext.configuration.oauth_client_secret,
         redirect_uri: redirectUri
       });
     return response.body;
@@ -231,26 +232,26 @@ export class OAuthConnector {
 
   /**
    * Obtains a new access token using refresh token.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {*} tokenContext An object representing the result of the getAccessToken call. It contains refresh_token.
    * @param {string} redirectUri The redirect_uri value Fusebit used to start the authorization flow.
    */
   async refreshAccessToken(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     tokenContext: OAuthTokenResponse,
     redirectUri: string
   ) {
     const currentRefreshToken = tokenContext.refresh_token;
     const response = await Superagent.post(
-      fusebitContext.configuration.vendor_oauth_token_url
+      integrationContext.configuration.oauth_token_url
     )
       .type('form')
       .send({
         grant_type: 'refresh_token',
         refresh_token: tokenContext.refresh_token,
-        client_id: fusebitContext.configuration.vendor_oauth_client_id,
-        client_secret: fusebitContext.configuration.vendor_oauth_client_secret,
-        redirect_uri: redirectUri || `${fusebitContext.baseUrl}/callback`
+        client_id: integrationContext.configuration.oauth_client_id,
+        client_secret: integrationContext.configuration.oauth_client_secret,
+        redirect_uri: redirectUri || `${integrationContext.baseUrl}/callback`
       });
     if (!response.body.refresh_token) {
       response.body.refresh_token = currentRefreshToken;
@@ -290,13 +291,13 @@ export class OAuthConnector {
    * of the user in another system, or a URL to obtain the access token to another system. You can use this extensibility
    * point to modify the 'userContext' with information about the identity of the user in another system, therefore
    * creating an association between the same user in two systems.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {*} userContext The user context representing the vendor's user. Contains vendorToken and vendorUserProfile, representing responses
    * from getAccessToken and getUserProfile, respectively.
    * @param {*} data A property bag containing properties generated by settings managers that have completed prior to the configuration flow of this connector.
    */
   async onConfigurationComplete(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     userContext: UserContext,
     data: { [key: string]: any }
   ) {
@@ -305,7 +306,7 @@ export class OAuthConnector {
         const match = p.match(/^(.+)_oauth_user_id$/);
         if (
           match &&
-          match[1] !== fusebitContext.configuration.vendor_prefix &&
+          match[1] !== integrationContext.configuration.vendor_prefix &&
           typeof data[`${match[1]}_oauth_connector_base_url`] === 'string'
         ) {
           userContext.foreignOAuthIdentities = {
@@ -324,13 +325,13 @@ export class OAuthConnector {
    * Called after a new user successfuly completed a configuration flow and was persisted in the system. This extensibility
    * point allows for creation of any artifacts required to serve this new user, for example creation of additional
    * Fusebit functions.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {*} userContext The user context representing the vendor's user. Contains vendorToken and vendorUserProfile, representing responses
    * from getAccessToken and getUserProfile, respectively.
    */
   async onNewUser(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     userContext: UserContext
   ) {
@@ -341,12 +342,12 @@ export class OAuthConnector {
    * Returns the HTML of the web page that initiates the authorization flow to the authorizationUrl. Return
    * undefined if you don't want to present any HTML to the user but instead redirect the user directly to
    * the authorizationUrl.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {string} authorizationUrl The fully formed authorization url to redirect the user to
    */
   async getAuthorizationPageHtml(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     authorizationUrl: string
   ) {
@@ -355,18 +356,19 @@ export class OAuthConnector {
 
   /**
    * Gets the user context representing the user with vendorUserId id. Returned object contains vendorToken and vendorUserProfile properties.
-   * @param {FusebitContext} fusebitContext The Fusebit context
+   * @param {IntegrationContext} integrationContext The integration context
    * @param {string} vendorUserId The vendor user id
    * @param {string} foreignVendorId If specified, vendorUserId represents the identity of the user in another system.
    * The foreignVendorId must correspond to an entry in userContext.foreignOAuthIdentities.
    */
   async getUser(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     vendorUserId: string,
     foreignVendorId?: string
   ): Promise<UserContext | undefined> {
+    await Logger.info('Get user from storage.');
     if (foreignVendorId) {
-      const data = await fusebitContext.storage.get(
+      const data = await integrationContext.storage.get(
         this.getStorageIdForVendorUser(vendorUserId, foreignVendorId)
       );
       vendorUserId = data && data.data && data.data.vendorUserId;
@@ -374,7 +376,7 @@ export class OAuthConnector {
         return undefined;
       }
     }
-    const s = await fusebitContext.storage.get(
+    const s = await integrationContext.storage.get(
       this.getStorageIdForVendorUser(vendorUserId)
     );
     return s ? s.data : undefined;
@@ -382,14 +384,18 @@ export class OAuthConnector {
 
   /**
    * Saves user context in storage for future use.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {*} userContext The user context representing the vendor's user. Contains vendorToken and vendorUserProfile, representing responses
    * from getAccessToken and getUserProfile, respectively.
    */
-  async saveUser(fusebitContext: FusebitContext, userContext: UserContext) {
+  async saveUser(
+    integrationContext: IntegrationContext,
+    userContext: UserContext
+  ) {
+    await Logger.info('Saving user to storage.');
     if (userContext.foreignOAuthIdentities) {
       for (const foreignVendorId in userContext.foreignOAuthIdentities) {
-        await fusebitContext.storage.put(
+        await integrationContext.storage.put(
           { data: { vendorUserId: userContext.vendorUserId } },
           this.getStorageIdForVendorUser(
             userContext.foreignOAuthIdentities[foreignVendorId].userId,
@@ -398,7 +404,7 @@ export class OAuthConnector {
         );
       }
     }
-    return fusebitContext.storage.put(
+    return integrationContext.storage.put(
       { data: userContext },
       this.getStorageIdForVendorUser(userContext.vendorUserId)
     );
@@ -406,24 +412,24 @@ export class OAuthConnector {
 
   /**
    * Deletes user context from storage.
-   * @param {FusebitContext} fusebitContext The Fusebit context
+   * @param {IntegrationContext} integrationContext The integration context
    * @param {string} vendorUserId The vendor user id
    * @param {string} vendorId If specified, vendorUserId represents the identity of the user in another system.
    * The vendorId must correspond to an entry in userContext.foreignOAuthIdentities.
    */
   async deleteUser(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     vendorUserId: string,
     vendorId?: string
   ) {
     const userContext = await this.getUser(
-      fusebitContext,
+      integrationContext,
       vendorUserId,
       vendorId
     );
     if (userContext && userContext.foreignOAuthIdentities) {
       for (const fvId in userContext.foreignOAuthIdentities) {
-        await fusebitContext.storage.delete(
+        await integrationContext.storage.delete(
           this.getStorageIdForVendorUser(
             userContext.foreignOAuthIdentities[fvId].userId,
             fvId
@@ -433,7 +439,7 @@ export class OAuthConnector {
     }
     return (
       userContext &&
-      fusebitContext.storage.delete(
+      integrationContext.storage.delete(
         this.getStorageIdForVendorUser(userContext.vendorUserId)
       )
     );
@@ -441,13 +447,13 @@ export class OAuthConnector {
 
   /**
    * Gets the health status of the user
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {*} userContext The user context representing the vendor's user. Contains vendorToken and vendorUserProfile, representing responses
    * from getAccessToken and getUserProfile, respectively.
    */
   async getHealth(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     userContext: UserContext
   ): Promise<{ status: number; body?: any }> {
@@ -459,13 +465,13 @@ export class OAuthConnector {
    * or a valid access token to a foreign system if foreignVendorId is specified.
    * For the vendor's system, if the currently stored access token is expired or nearing expiry, and a refresh token is available, a new access
    * token is obtained, stored for future use, and returned. If a current access token cannot be returned, an exception is thrown.
-   * @param {FusebitContext} fusebitContext The Fusebit context of the request
+   * @param {IntegrationContext} integrationContext The integration context of the request
    * @param {*} userContext The vendor user context
    * @param {string} foreignVendorId If specified, gets a valid access token for the OAuth connector identified by the
    * foreignVendorId entry in the userContext.foreignOAuthIdentities rather than a user of this connector.
    */
   async ensureAccessToken(
-    fusebitContext: FusebitContext,
+    integrationContext: IntegrationContext,
     userContext: UserContext,
     foreignVendorId?: string
   ) {
@@ -473,10 +479,10 @@ export class OAuthConnector {
       const oauthIdentity = (userContext.foreignOAuthIdentities || {})[
         foreignVendorId!
       ];
-      debug(
-        'OBTAINING ACCESS TOKEN FOR FOREIGN USER',
-        foreignVendorId,
-        oauthIdentity
+      await Logger.debug(
+        `OBTAINING ACCESS TOKEN FOR FOREIGN USER,
+        foreignVenderId: ${foreignVendorId},
+        oauthIdentity: ${oauthIdentity}`
       );
       if (oauthIdentity) {
         try {
@@ -486,7 +492,7 @@ export class OAuthConnector {
             )}/token`
           ).set(
             'Authorization',
-            `Bearer ${fusebitContext.fusebit.functionAccessToken}`
+            `Bearer ${integrationContext.fusebit.functionAccessToken}`
           );
           return response.body;
         } catch (e: any) {
@@ -508,22 +514,23 @@ export class OAuthConnector {
           userContext.vendorToken.expires_at >
             Date.now() + this.accessTokenExpirationBuffer)
       ) {
-        debug(
-          'RETURNING CURRENT ACCESS TOKEN FOR USER',
-          userContext.vendorUserId
+        await Logger.info(
+          `RETURNING CURRENT ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
         );
         return userContext.vendorToken;
       }
       if (userContext.vendorToken?.refresh_token) {
-        debug('REFRESHING ACCESS TOKEN FOR USER', userContext.vendorUserId);
+        await Logger.info(
+          `REFRESHING ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
+        );
         userContext.status = 'refreshing';
         userContext.lastRefreshStarted = Date.now();
         try {
-          await this.saveUser(fusebitContext, userContext);
+          await this.saveUser(integrationContext, userContext);
           userContext.vendorToken = await this.refreshAccessToken(
-            fusebitContext,
+            integrationContext,
             userContext.vendorToken,
-            `${fusebitContext.baseUrl}/callback`
+            `${integrationContext.baseUrl}/callback`
           );
           if (userContext.vendorToken) {
             if (!isNaN(userContext.vendorToken.expires_in)) {
@@ -537,50 +544,50 @@ export class OAuthConnector {
           userContext.status = 'authenticated';
           userContext.refreshErrorCount = 0;
           delete userContext.lastRefreshError;
-          await this.saveUser(fusebitContext, userContext);
+          await this.saveUser(integrationContext, userContext);
           return userContext.vendorToken;
         } catch (e: any) {
           if (
             userContext.refreshErrorCount &&
             userContext.refreshErrorCount > this.refreshErrorLimit
           ) {
-            debug('REFRESH TOKEN ERROR, DELETING USER', e);
-            await this.deleteUser(fusebitContext, userContext.vendorUserId);
-            throw new RefreshTokenError({
-              name: ErrorName.REFRESH_TOKEN_ATTEMPTS_EXHAUSTED,
-              message: `Error refreshing access token. Maximum number of attempts exceeded, user has been deleted: ${e.message}`
+            const msg = `Credential "${userContext.vendorUserId}" has expired. Unable to refresh token after ${this.refreshErrorLimit} attempts: ${e.message}`;
+            await Logger.error(msg, e);
+            throw createHttpError(StatusCodes.UNAUTHORIZED, msg, {
+              [LogContextKey.ExtendedMessage]: e.message,
+              [LogContextKey.ApiUrl]:
+                integrationContext.configuration?.oauth_token_url
             });
           } else {
             userContext.refreshErrorCount =
               (userContext.refreshErrorCount || 0) + 1;
             userContext.status = 'refresh_error';
             userContext.lastRefreshError = e.message;
-            await this.saveUser(fusebitContext, userContext);
-            throw new RefreshTokenError({
-              name: ErrorName.REFRESH_TOKEN_ATTEMP_FAILED,
-              message: `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`
-            });
+            await this.saveUser(integrationContext, userContext);
+            throw createHttpError(
+              StatusCodes.UNAUTHORIZED,
+              `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`,
+              {
+                [LogContextKey.ExtendedMessage]: e.message,
+                [LogContextKey.ApiUrl]:
+                  integrationContext.configuration?.oauth_token_url
+              }
+            );
           }
         }
       }
-      debug(
-        'REFRESH TOKEN ERROR: ACCESS TOKEN EXPIRED BUT REFRESH TOKEN ABSENT, DELETING USER'
-      );
-      await this.deleteUser(fusebitContext, userContext.vendorUserId);
-      throw new Error(
-        `Access token is expired and cannot be refreshed because the refresh token is not present.`
-      );
+      const msg = `Access token is expired and cannot be refreshed because the refresh token is not present. Credential: "${userContext.vendorUserId}"`;
+      await Logger.error(msg);
+      throw createHttpError(StatusCodes.UNAUTHORIZED, msg);
     };
 
     const waitForRefreshedAccessToken = async (
       count: number,
       backoff: number
     ) => {
-      debug(
-        'WAITING FOR ACCESS TOKEN TO BE REFRESHED FOR USER',
-        userContext.vendorUserId,
-        'ATTEMPTS LEFT',
-        count
+      await Logger.info(
+        `Waiting for access token to be refreshed for user: ${userContext.vendorUserId}, 
+        ATTEMPTS LEFT: ${count}`
       );
       if (!(count > 0)) {
         throw new Error(
@@ -592,7 +599,7 @@ export class OAuthConnector {
           let newUserContext;
           try {
             newUserContext = await this.getUser(
-              fusebitContext,
+              integrationContext,
               userContext.vendorUserId
             );
             if (!newUserContext || newUserContext.status === 'refresh_error') {
@@ -625,7 +632,8 @@ export class OAuthConnector {
 
     if (foreignVendorId) {
       // Get access token from foreign OAuth connector specified in userContext.foreignOAuthIdentities
-      return await ensureForeignAccessToken();
+      await Logger.info(`Ensuring Foreign Access Token.`);
+      return ensureForeignAccessToken();
     } else {
       if (
         userContext.status === 'refreshing' &&
@@ -634,13 +642,15 @@ export class OAuthConnector {
           Date.now()
       ) {
         // Wait for the currently ongoing refresh operation to finish
-        return await waitForRefreshedAccessToken(
+        await Logger.info(`Waiting for Refreshed Access Token.`);
+        return waitForRefreshedAccessToken(
           this.refreshWaitCountLimit,
           this.refreshInitialBackoff
         );
       } else {
         // Get access token for "this" OAuth connector
-        return await ensureLocalAccessToken();
+        await Logger.info(`Ensuring Local Access Token.`);
+        return ensureLocalAccessToken();
       }
     }
   }

@@ -1,13 +1,14 @@
+import { OAuthConnector, UserContext } from './OAuthConnector';
+
 import {
   completeWithSuccess,
   debug,
-  FusebitContext,
   FunctionData,
   FunctionState,
+  IntegrationContext,
   redirect,
   serializeState
 } from '../add-on-sdk';
-import { OAuthConnector, UserContext } from './OAuthConnector';
 
 const createHttpException = (message: string, state: any) => ({
   status: 500,
@@ -17,7 +18,7 @@ const createHttpException = (message: string, state: any) => ({
 
 const configure = (connector: OAuthConnector) => {
   const settingsManagers = async (
-    ctx: FusebitContext,
+    ctx: IntegrationContext,
     state: FunctionState,
     data: FunctionData
   ) => {
@@ -75,7 +76,7 @@ const configure = (connector: OAuthConnector) => {
   };
 
   const authInit = async (
-    ctx: FusebitContext,
+    ctx: IntegrationContext,
     state: FunctionState,
     data: FunctionData
   ) => {
@@ -91,6 +92,7 @@ const configure = (connector: OAuthConnector) => {
       serializeState(state),
       `${ctx.baseUrl}/callback`
     );
+
     const view = await connector.getAuthorizationPageHtml(
       ctx,
       authorizationUrl
@@ -109,7 +111,10 @@ const configure = (connector: OAuthConnector) => {
         };
   };
 
-  const authCallback = async (ctx: FusebitContext, state: FunctionState) => {
+  const authCallback = async (
+    ctx: IntegrationContext,
+    state: FunctionState
+  ) => {
     // Process OAuth callback
 
     let vendorUserId = '';
@@ -153,7 +158,7 @@ const configure = (connector: OAuthConnector) => {
       data[`${ctx.configuration.vendor_prefix}_oauth_connector_base_url`] =
         ctx.baseUrl;
       state.configurationState = 'settingsManagers';
-      return await settingsManagers(ctx, state, data);
+      return settingsManagers(ctx, state, data);
     } else {
       throw createHttpException(
         `Authentication failed: ${
