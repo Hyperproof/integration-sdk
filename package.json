@@ -4,7 +4,7 @@
   "description": "Hyperproof Integration SDK",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Hyperproof/integration-sdk"
+    "url": "git+https://github.com/Hyperproof/integration-sdk.git"
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
