@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-namespace */
-import { FusebitContext } from './add-on-sdk';
+import { IntegrationContext } from './add-on-sdk';
 import { UserContext } from './oauth-connector';
 
 export {};
@@ -7,7 +7,7 @@ export {};
 declare global {
   export namespace Express {
     interface Request {
-      fusebit: FusebitContext;
+      fusebit: IntegrationContext;
       userContext?: UserContext;
     }
 

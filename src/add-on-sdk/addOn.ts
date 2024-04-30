@@ -1,24 +1,32 @@
+import {
+  FunctionConfiguration,
+  FunctionData,
+  FunctionError,
+  FunctionState,
+  IntegrationContext,
+  LifeCycleManagerOptions,
+  ListStorageOptions
+} from './addOnModels';
+
+import bodyParser from 'body-parser';
+import express from 'express';
+import createHttpError from 'http-errors';
+import { StatusCodes } from 'http-status-codes';
+import Mock from 'mock-http';
 import Superagent from 'superagent';
 import Url from 'url';
-import Mock from 'mock-http';
-import {
-  FusebitContext,
-  FunctionConfiguration,
-  FunctionState,
-  FunctionData,
-  ListStorageOptions,
-  FunctionError,
-  LifeCycleManagerOptions
-} from './addOnModels';
-import express from 'express';
+
+import { LogContextKey } from '../models';
+
+let logger: (message?: any, ...optionalParams: any[]) => void = console.log;
 
 export function debug(...args: any[]) {
   if (process.env.debug === '1') {
-    console.log(args);
+    logger(args);
   }
 }
 
-function validateReturnTo(ctx: FusebitContext) {
+function validateReturnTo(ctx: IntegrationContext) {
   if (ctx.query?.returnTo) {
     const validReturnTo = (
       ctx.configuration.fusebit_allowed_return_to || ''
@@ -51,7 +59,7 @@ export const createSettingsManager = (
   disableDebug?: boolean
 ) => {
   const { states, initialState } = configure;
-  return async (ctx: FusebitContext): Promise<FunctionState> => {
+  return async (ctx: IntegrationContext): Promise<FunctionState> => {
     if (!disableDebug) {
       debug(
         'DEBUGGING ENABLED. To disable debugging information, comment out the `debug` configuration setting.'
@@ -74,7 +82,7 @@ export const createSettingsManager = (
       }
       const stateHandler = states[state.configurationState!];
       if (stateHandler) {
-        return stateHandler(ctx, state, data);
+        return await stateHandler(ctx, state, data);
       } else {
         throw {
           status: 400,
@@ -90,7 +98,7 @@ export const createSettingsManager = (
 
 export const createLifecycleManager = (options: LifeCycleManagerOptions) => {
   const { configure, install, uninstall } = options;
-  return async (ctx: FusebitContext) => {
+  return async (ctx: IntegrationContext) => {
     debug(
       'DEBUGGING ENABLED. To disable debugging information, comment out the `debug` configuration setting.'
     );
@@ -141,7 +149,7 @@ export const deserializeState = <TData>(state: string): TData =>
   JSON.parse(Buffer.from(state, 'base64').toString());
 
 export const getInputs = (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   initialConfigurationState: string
 ): [FunctionState, FunctionData] => {
   let data: FunctionData;
@@ -214,7 +222,7 @@ export const completeWithSuccess = (
 };
 
 export const completeWithError = (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   error: FunctionError
 ) => {
   debug('COMPLETE WITH ERROR', error);
@@ -234,12 +242,12 @@ export const completeWithError = (
   }
 };
 
-export const getSelfUrl = (ctx: FusebitContext) => {
+export const getSelfUrl = (ctx: IntegrationContext) => {
   return ctx.baseUrl;
 };
 
 export const redirect = (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   state: FunctionState,
   data: FunctionData,
   redirectUrl: string,
@@ -257,7 +265,7 @@ export const redirect = (
 };
 
 export const createFunction = async (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   functionSpecification: object,
   accessToken: string
 ) => {
@@ -325,7 +333,7 @@ export const createFunction = async (
 };
 
 export const deleteFunction = async (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   accessToken: string,
   boundaryId?: string,
   functionId?: string
@@ -342,7 +350,7 @@ export const deleteFunction = async (
 };
 
 export const getFunctionDefinition = async (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   accessToken: string,
   boundaryId: string,
   functionId: string
@@ -358,28 +366,11 @@ export const getFunctionDefinition = async (
   return response.body;
 };
 
-export const getFunctionUrl = async (
-  ctx: FusebitContext,
-  accessToken: string,
-  boundaryId: string,
-  functionId: string
-) => {
-  const response = await Superagent.get(
-    `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${
-      ctx.body.subscriptionId
-    }/boundary/${boundaryId || ctx.body.boundaryId}/function/${
-      functionId || ctx.body.functionId
-    }/location`
-  ).set('Authorization', `Bearer ${accessToken}`);
-
-  return response.body.location;
-};
-
 const removeLeadingSlash = (s: string) => s.replace(/^\/(.+)$/, '$1');
 const removeTrailingSlash = (s: string) => s.replace(/^(.+)\/$/, '$1');
 
 export const createStorageClient = async (
-  ctx: FusebitContext,
+  ctx: IntegrationContext,
   accessToken: string,
   storageIdPrefix: string
 ) => {
@@ -387,9 +378,10 @@ export const createStorageClient = async (
     ? removeLeadingSlash(removeTrailingSlash(storageIdPrefix))
     : '';
   const functionUrl = Url.parse(ctx.baseUrl!);
-  const storageBaseUrl = `${functionUrl.protocol}//${
-    functionUrl.host
-  }/v1/account/${ctx.accountId}/subscription/${ctx.subscriptionId}/storage${
+  const storageBase =
+    ctx?.fusebit?.storageServiceUrl ??
+    `${functionUrl.protocol}//${functionUrl.host}/v1/account/${ctx.accountId}/subscription/${ctx.subscriptionId}`;
+  const storageBaseUrl = `${storageBase}/storage${
     storageIdPrefix ? '/' + storageIdPrefix : ''
   }`;
 
@@ -477,15 +469,31 @@ export const createFusebitFunctionFromExpress = (
     Mock.Request.prototype
   );
 
-  return async (ctx: FusebitContext) => {
+  return async (ctx: IntegrationContext) => {
+    if (ctx.logger) {
+      logger = ctx.logger;
+    }
+
     debug('HTTP REQUEST', ctx.method, ctx.url, ctx.headers, ctx.body);
 
     if (!disableStorageClient) {
       ctx.storage = await createStorageClient(
         ctx,
         ctx.fusebit.functionAccessToken,
-        `boundary/${ctx.boundaryId}/function/${ctx.functionId}/root`
+        `boundary/${ctx.boundaryId}/function/${
+          process.env.storage_source ?? ctx.functionId
+        }/root`
       );
+    }
+
+    // When running in Azure, we need to manually populate the config object.
+    if (!ctx.configuration) {
+      ctx.configuration = {};
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined) {
+          ctx.configuration[k] = v;
+        }
+      }
     }
 
     // Create the mock request object and then extend it with Express
@@ -534,4 +542,100 @@ export const createFusebitFunctionFromExpress = (
       }
     });
   };
+};
+
+/**
+ * Creates an Express app that that can be connected to an HTTP server
+ * to handle incoming request to the /invoke endpoint.  Invoke requests are
+ * forwarded to the Express app created and configured by the integration.
+ */
+export const createHttpServerApp = (integrationApp: express.Express) => {
+  const app = express();
+  app.use(bodyParser.json());
+
+  // Main entry point to the integration.
+  app.post('/invoke', async (req: express.Request, res: express.Response) => {
+    return forwardIntegrationRequest(req, res, integrationApp);
+  });
+
+  // Catch 404 and forward to error handler
+  app.use(
+    (
+      eq: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => {
+      next(createHttpError(StatusCodes.NOT_FOUND));
+    }
+  );
+
+  // error handler. 4th param required, see 'Error-handling middleware'
+  // section: https://expressjs.com/en/guide/using-middleware.html
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: any, req: any, res: any, next: any) => {
+    // set locals, only providing error in development
+    res.locals.message = err.message;
+    res.locals.error = req.app.get('env') === 'development' ? err : {};
+
+    res
+      .status(err.status || err.code || StatusCodes.INTERNAL_SERVER_ERROR)
+      .json({
+        error: err.message,
+        extendedError: {
+          ...err,
+          [LogContextKey.StackTrace]: err.stack
+        }
+      });
+  });
+
+  return app;
+};
+
+/**
+ * Forwards a request recieved via the /invoke endpoint to the express
+ * app configured by an integration.
+ */
+const forwardIntegrationRequest = async (
+  req: express.Request,
+  res: express.Response,
+  app: express.Express,
+  { disableStorageClient } = {} as { [key: string]: any }
+) => {
+  const ctx: IntegrationContext = req.body;
+  if (ctx.logger) {
+    logger = ctx.logger;
+  }
+
+  debug('HTTP REQUEST', ctx.method, ctx.url, ctx.headers, ctx.body);
+
+  if (!disableStorageClient) {
+    ctx.storage = await createStorageClient(
+      ctx,
+      ctx.fusebit.functionAccessToken,
+      `boundary/${ctx.boundaryId}/function/${
+        process.env.storage_source ?? ctx.functionId
+      }/root`
+    );
+  }
+
+  // When running in Azure, we need to manually populate the config object.
+  if (!ctx.configuration) {
+    ctx.configuration = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined) {
+        ctx.configuration[k] = v;
+      }
+    }
+  }
+
+  // Modify the current request with information provided in the context object.
+  req.url = ctx.path!;
+  req.method = ctx.method;
+  req.headers = ctx.headers;
+  req.query = ctx.query;
+  req.body = ctx.body;
+  req.fusebit = ctx;
+
+  // Pass the modified request and the response on to the integration's express app.
+  return (app as any).handle(req, res);
 };

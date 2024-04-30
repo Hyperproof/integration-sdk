@@ -63,7 +63,7 @@ export interface IResourceAction {
   action: string;
 }
 
-export interface FusebitContext {
+export interface IntegrationContext {
   accountId: string;
   subscriptionId: string;
   boundaryId: string;
@@ -73,11 +73,12 @@ export interface FusebitContext {
   baseUrl?: string;
   url?: string;
   path?: string;
-  query?: { [key: string]: string | string[] };
-  headers?: { [key: string]: string };
+  query: { [key: string]: string | string[] };
+  headers: { [key: string]: string };
   body?: any;
   fusebit: {
     endpoint: string;
+    storageServiceUrl?: string;
     functionAccessToken: string;
   };
   caller: {
@@ -86,6 +87,7 @@ export interface FusebitContext {
     };
   };
   storage: StorageClient;
+  logger?: (message?: any, ...optionalParams: any[]) => void;
 }
 
 export interface FunctionState {
@@ -94,7 +96,7 @@ export interface FunctionState {
   returnToState?: string;
   body?: any;
   bodyEncoding?: string;
-  headers?: { [header: string]: string };
+  headers?: { [header: string]: string | undefined };
   status?: number;
   [key: string]: any;
 }
@@ -119,10 +121,10 @@ export interface FunctionConfiguration {
   initialState: string;
   states: {
     [state: string]: (
-      ctx: FusebitContext,
+      ctx: IntegrationContext,
       state: FunctionState,
       data: FunctionData
-    ) => FunctionState;
+    ) => Promise<FunctionState>;
   };
 }
 
@@ -133,6 +135,6 @@ export interface LifeCycleResult {
 
 export interface LifeCycleManagerOptions {
   configure: FunctionConfiguration;
-  install: (ctx: FusebitContext) => LifeCycleResult;
-  uninstall: (ctx: FusebitContext) => LifeCycleResult;
+  install: (ctx: IntegrationContext) => Promise<LifeCycleResult>;
+  uninstall: (ctx: IntegrationContext) => Promise<LifeCycleResult>;
 }
