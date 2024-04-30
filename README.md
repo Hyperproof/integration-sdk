@@ -4,6 +4,10 @@ SDK for building integrations in Hyperproof.
 
 ## Release Notes
 
+### 1.0.1
+
+- Fix issues in package.json
+
 ### 1.0.0
 
 - Add support for new integration execution environment
