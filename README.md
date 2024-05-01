@@ -4,6 +4,10 @@ SDK for building integrations in Hyperproof.
 
 ## Release Notes
 
+### 1.0.2
+
+- Remove SchemaCategory from Integration SDK as it is Hypersyncs only.
+
 ### 1.0.1
 
 - Fix issues in package.json
