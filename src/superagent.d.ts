@@ -5,7 +5,7 @@ declare module 'superagent' {
     // Guidance from Fusebit suggest that we should wait for requests to be
     // completely written in certain scenarios.  To do that we need access
     // to a private member on SuperAgentRequest.  See:
-    // https://hyperproof.atlassian.net/browse/HYP-16748
+    // https://jira.hyperproof.dev/browse/HYP-16748
     req: NodeJS.WriteStream;
   }
 }

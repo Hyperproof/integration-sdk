@@ -3,8 +3,7 @@ import {
   HealthStatus,
   ObjectStatus,
   ObjectType,
-  Priority,
-  SchemaCategory
+  Priority
 } from './enums';
 
 export interface IApiObject {
@@ -102,7 +101,6 @@ export interface IIntegration<
   objectId: string;
   objectType: ObjectType;
   settings: TIntegrationSettings;
-  schemaCategory: SchemaCategory;
 }
 
 export interface ITask extends IOrgObject {
@@ -210,6 +208,12 @@ export interface IExternalPermission {
 
 /**
  * An option that may be chosen in a select control.
+ *
+ * Please keep this in sync with the same interface in
+ * @hyperproof/hypersync-models.  We want to avoid a dependency
+ * between the two libraries (hypersync-models is designed to
+ * be small and light) but we definitely need the interface in
+ * both places.
  */
 export interface ISelectOption {
   value: string | number;

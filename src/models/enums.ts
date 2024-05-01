@@ -142,11 +142,6 @@ export enum HealthStatus {
   NotImplemented = 'notImplemented'
 }
 
-export enum SchemaCategory {
-  UarDirectory = 'uarDirectory',
-  UarApplication = 'uarApplication'
-}
-
 export const HYPERPROOF_VENDOR_KEY = 'hyperproof';
 
 export const FOREIGN_VENDOR_USER = 'foreign-vendor-user';
