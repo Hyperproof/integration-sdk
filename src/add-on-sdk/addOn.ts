@@ -553,6 +553,14 @@ export const createHttpServerApp = (integrationApp: express.Express) => {
   const app = express();
   app.use(bodyParser.json());
 
+  // Readiness endpoint.
+  app.get(
+    '/health/readiness',
+    async (req: express.Request, res: express.Response) => {
+      res.status(200).send('OK');
+    }
+  );
+
   // Main entry point to the integration.
   app.post('/invoke', async (req: express.Request, res: express.Response) => {
     return forwardIntegrationRequest(req, res, integrationApp);
