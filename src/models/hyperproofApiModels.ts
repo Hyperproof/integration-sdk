@@ -207,21 +207,45 @@ export interface IExternalPermission {
   required?: boolean;
 }
 
+export interface IExTag {
+  id: string;
+  name: string;
+}
+
 /**
- * An option that may be chosen in a select control.
- *
- * Please keep this in sync with the same interface in
+ * IMPORTANT!
+ * Please keep the types below in sync with the same interface in
  * @hyperproof/hypersync-models.  We want to avoid a dependency
  * between the two libraries (hypersync-models is designed to
- * be small and light) but we definitely need the interface in
+ * be small and light) but we definitely need the interfaces in
  * both places.
+ */
+
+/**
+ * An option that may be chosen in a select control.
  */
 export interface ISelectOption {
   value: string | number;
   label: string;
 }
 
-export interface IExTag {
-  id: string;
-  name: string;
+export interface IValidation {
+  type: ValidationTypeString;
+  regex?: string;
+  errorMessage?: string;
 }
+
+export enum ValidationTypes {
+  alphaNumeric = 'alphaNumeric',
+  regex = 'regex',
+  url = 'url',
+  urlOrHost = 'urlOrHost',
+  uuid = 'uuid'
+}
+
+export type ValidationTypeString =
+  | 'alphaNumeric'
+  | 'regex'
+  | 'url'
+  | 'urlOrHost'
+  | 'uuid';
