@@ -14,8 +14,8 @@ const pluralize = (value: ObjectType) => {
  * Generic method for comparing two values (strings, numbers, booleans, BigInts or Dates).
  */
 export const compareValues = (
-  s1?: string | number | boolean | BigInt | Date | null,
-  s2?: string | number | boolean | BigInt | Date | null
+  s1?: string | number | boolean | bigint | Date | null,
+  s2?: string | number | boolean | bigint | Date | null
 ) => {
   // Treat null and undefined values as undefined.
   s1 = s1 ?? undefined;

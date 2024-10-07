@@ -161,6 +161,10 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
     return this.responseCode;
   }
 
+  get statusCode() {
+    return this.responseCode;
+  }
+
   get message() {
     return (
       this.error?.message ||
@@ -315,10 +319,13 @@ const extractDelayFromResponseHeaders = async (
       await Logger.info(`Got value from Retry-After header. ${retryAfter}`);
       return Number(retryAfter);
     }
-    const rateLimitRemaining = findAttr(['x-ratelimit-remaining'], headers);
+    const rateLimitRemaining = findAttr(
+      ['x-ratelimit-remaining', 'x-rate-limit-remaining'],
+      headers
+    );
     if (rateLimitRemaining !== '' && Number(rateLimitRemaining) <= 0) {
       const rateLimitReset = findAttr(
-        ['x-ratelimit-reset', 'x-ratelimit-retryafter'],
+        ['x-ratelimit-reset', 'x-rate-limit-reset', 'x-ratelimit-retryafter'],
         headers
       );
       if (rateLimitReset) {
@@ -332,6 +339,7 @@ const extractDelayFromResponseHeaders = async (
         );
       }
     }
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
   } catch (ignored) {
     return undefined;
   }

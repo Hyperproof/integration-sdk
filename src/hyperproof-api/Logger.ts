@@ -36,6 +36,8 @@ interface ILogEvent {
   orgId?: string;
   userId?: string;
   integrationType?: string;
+  traceId?: string;
+  syncSpanId?: string;
 }
 
 declare global {
@@ -44,7 +46,7 @@ declare global {
 }
 
 export class Logger {
-  public static init(subscriptionKey: string) {
+  public static init(subscriptionKey?: string) {
     global._hyperproof_api_subscription_key =
       subscriptionKey ?? global._hyperproof_api_subscription_key;
   }
@@ -154,6 +156,8 @@ export class Logger {
         orgId: context?.[LoggerContextKey.OrgId],
         userId: context?.[LoggerContextKey.UserId],
         integrationType: context?.[LoggerContextKey.IntegrationType],
+        syncSpanId: TraceParent.getSyncSpanId(),
+        traceId: TraceParent.getTraceId(),
         stack
       };
 

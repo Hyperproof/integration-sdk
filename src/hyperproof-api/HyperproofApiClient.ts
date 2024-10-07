@@ -30,6 +30,39 @@ const MAX_FILE_SIZE = 100 * BYTES_IN_MEGABYTE;
 const TXT_EXTENSION = 'txt';
 const LDIF_EXTENSION = 'ldif';
 
+const alternateMessages: { [key: number]: string } = {
+  [StatusCodes.UNAUTHORIZED]:
+    'Your connection may have expired. Please re-authenticate your connection.',
+  [StatusCodes.FORBIDDEN]: 'You do not have permission to access this object.',
+  [StatusCodes.NOT_FOUND]: 'Referenced object is missing.'
+};
+
+const createAndLogErrorMessage = (
+  status: number,
+  method: string,
+  url: string,
+  message: string,
+  objectType?: ObjectType
+) => {
+  const displayUrl = new URL(url).pathname;
+  try {
+    const json = JSON.parse(message);
+    if (json.error) {
+      message = json.error;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  } catch (ignore: any) {
+    // just use the string if it's not valid json
+  }
+  const longMsg = `Received ${status} response from Hyperproof when attempting to ${method} ${displayUrl}${
+    objectType ? ' ' + objectType : ''
+  }: ${message}`;
+  debug(longMsg);
+  return alternateMessages[status]
+    ? `${alternateMessages[status]} ${longMsg}`
+    : longMsg;
+};
+
 /**
  * Client interface to the Hyperproof API.
  */
@@ -99,6 +132,7 @@ export class HyperproofApiClient {
     userId: string
   ) {
     // this is done to trigger the non null check in the getter method
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     HyperproofApiClient.subscriptionKey;
 
     await Logger.debug(
@@ -149,10 +183,19 @@ export class HyperproofApiClient {
         response.status === StatusCodes.CONFLICT
           ? 'Operation is already in process'
           : await response.text();
-      throw createHttpError(response.status, errorText);
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.GET,
+          url,
+          errorText,
+          objectType
+        )
+      );
     }
 
-    return response.json();
+    return response.json() as Promise<IIntegration<TIntegration>>;
   }
 
   /**
@@ -189,10 +232,20 @@ export class HyperproofApiClient {
     debug(`PATCH ${url} - ${response.status}`);
 
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.PATCH,
+          url,
+          await response.text(),
+          objectType
+        )
+      );
     }
     try {
       return await response.json();
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
     } catch (err) {
       // swallow for 204;
     }
@@ -225,7 +278,16 @@ export class HyperproofApiClient {
     debug(`POST ${url} - ${response.status}`);
 
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.POST,
+          url,
+          await response.text(),
+          objectType
+        )
+      );
     }
 
     return response.json();
@@ -305,7 +367,15 @@ export class HyperproofApiClient {
     });
     debug(`POST ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.POST,
+          url,
+          await response.text()
+        )
+      );
     }
     return response.json();
   }
@@ -327,7 +397,15 @@ export class HyperproofApiClient {
     });
     debug(`GET ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.GET,
+          url,
+          await response.text()
+        )
+      );
     }
 
     return response.json();
@@ -356,7 +434,15 @@ export class HyperproofApiClient {
     });
     debug(`PATCH ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.PATCH,
+          url,
+          await response.text()
+        )
+      );
     }
 
     return response.json();
@@ -381,10 +467,18 @@ export class HyperproofApiClient {
     });
     debug(`GET ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.GET,
+          url,
+          await response.text()
+        )
+      );
     }
 
-    return response.json();
+    return response.json() as Promise<ITask>;
   }
 
   /**
@@ -408,7 +502,15 @@ export class HyperproofApiClient {
     });
     debug(`POST ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.POST,
+          url,
+          await response.text()
+        )
+      );
     }
 
     return response.json();
@@ -428,7 +530,7 @@ export class HyperproofApiClient {
   ) {
     const proofMeta = await this.getTaskProofMeta(objectId, sourceFileId);
     const results = [];
-    for (const proof of proofMeta) {
+    for (const proof of proofMeta as any) {
       const url = `${process.env.hyperproof_api_url}/beta/proof/${proof.id}/links/${objectId}/archive?objectType=task`;
       const response = await HyperproofApiClient.fetchWithRetry(url, {
         method: 'POST',
@@ -442,7 +544,15 @@ export class HyperproofApiClient {
       });
 
       if (!response.ok && response.status !== 404) {
-        throw createHttpError(response.status, await response.text());
+        throw createHttpError(
+          response.status,
+          createAndLogErrorMessage(
+            response.status,
+            HttpMethod.POST,
+            url,
+            await response.text()
+          )
+        );
       }
       const proofArchive = await response.json();
       results.push(proofArchive);
@@ -468,7 +578,16 @@ export class HyperproofApiClient {
 
     debug(`GET ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.GET,
+          url,
+          await response.text(),
+          objectType
+        )
+      );
     }
 
     return response.json();
@@ -543,7 +662,15 @@ export class HyperproofApiClient {
     });
     debug(`GET ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.GET,
+          url,
+          await response.text()
+        )
+      );
     }
 
     return response.json();
@@ -572,7 +699,16 @@ export class HyperproofApiClient {
     });
     debug(`POST ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          HttpMethod.POST,
+          url,
+          await response.text(),
+          objectType
+        )
+      );
     }
 
     return response.json();
@@ -623,7 +759,16 @@ export class HyperproofApiClient {
     });
     debug(`${method} ${url} - ${response.status}`);
     if (!response.ok) {
-      throw createHttpError(response.status, await response.text());
+      throw createHttpError(
+        response.status,
+        createAndLogErrorMessage(
+          response.status,
+          method,
+          url,
+          await response.text(),
+          objectType
+        )
+      );
     }
     return response.json();
   }

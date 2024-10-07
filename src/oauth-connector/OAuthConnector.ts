@@ -252,8 +252,16 @@ export class OAuthConnector {
         client_id: integrationContext.configuration.oauth_client_id,
         client_secret: integrationContext.configuration.oauth_client_secret,
         redirect_uri: redirectUri || `${integrationContext.baseUrl}/callback`
+      })
+      .catch(err => {
+        // superagent uses a generic error message for 4xx responses, so we need to pull out the actual error
+        if (typeof err.response?.body?.error === 'string') {
+          err.message = err.response.body.error;
+        }
+        throw err;
       });
     if (!response.body.refresh_token) {
+      Logger.info('No refresh token in response, reusing the current one.');
       response.body.refresh_token = currentRefreshToken;
     }
     return response.body;
@@ -366,16 +374,19 @@ export class OAuthConnector {
     vendorUserId: string,
     foreignVendorId?: string
   ): Promise<UserContext | undefined> {
-    await Logger.info('Get user from storage.');
     if (foreignVendorId) {
       const data = await integrationContext.storage.get(
         this.getStorageIdForVendorUser(vendorUserId, foreignVendorId)
       );
       vendorUserId = data && data.data && data.data.vendorUserId;
       if (!vendorUserId) {
+        await Logger.info(
+          `Could not find vendorUserId from storage for foreignVendorId: ${foreignVendorId}, vendorUserId: ${vendorUserId}`
+        );
         return undefined;
       }
     }
+    await Logger.info(`Getting user from storage: ${vendorUserId}`);
     const s = await integrationContext.storage.get(
       this.getStorageIdForVendorUser(vendorUserId)
     );
@@ -392,7 +403,9 @@ export class OAuthConnector {
     integrationContext: IntegrationContext,
     userContext: UserContext
   ) {
-    await Logger.info('Saving user to storage.');
+    await Logger.info(
+      `Saving user with status ${userContext.status} to storage.`
+    );
     if (userContext.foreignOAuthIdentities) {
       for (const foreignVendorId in userContext.foreignOAuthIdentities) {
         await integrationContext.storage.put(
@@ -475,6 +488,8 @@ export class OAuthConnector {
     userContext: UserContext,
     foreignVendorId?: string
   ) {
+    const expiredRefreshTokenMessage =
+      'Refresh token expired. Please reauthorize the connection.';
     const ensureForeignAccessToken = async () => {
       const oauthIdentity = (userContext.foreignOAuthIdentities || {})[
         foreignVendorId!
@@ -519,6 +534,16 @@ export class OAuthConnector {
         );
         return userContext.vendorToken;
       }
+      if (userContext.status === 'refresh_failed') {
+        await Logger.error(
+          `EXPIRED ACCESS TOKEN FOR USER ${userContext.vendorUserId}, THROWING UNAUTHORIZED`
+        );
+        throw createHttpError(
+          StatusCodes.UNAUTHORIZED,
+          expiredRefreshTokenMessage
+        );
+      }
+
       if (userContext.vendorToken?.refresh_token) {
         await Logger.info(
           `REFRESHING ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
@@ -547,32 +572,33 @@ export class OAuthConnector {
           await this.saveUser(integrationContext, userContext);
           return userContext.vendorToken;
         } catch (e: any) {
+          const responseText = e.response?.text;
           if (
             userContext.refreshErrorCount &&
             userContext.refreshErrorCount > this.refreshErrorLimit
           ) {
-            const msg = `Credential "${userContext.vendorUserId}" has expired. Unable to refresh token after ${this.refreshErrorLimit} attempts: ${e.message}`;
-            await Logger.error(msg, e);
+            const msg = `Credential "${userContext.vendorUserId}" has expired. This may be resolved by reauthorizing the connection. Unable to refresh token after ${this.refreshErrorLimit} attempts: ${e.message}`;
+            userContext.status = 'refresh_failed';
+            userContext.lastRefreshError = msg;
+            await this.saveUser(integrationContext, userContext);
+            await Logger.error(msg, responseText);
             throw createHttpError(StatusCodes.UNAUTHORIZED, msg, {
-              [LogContextKey.ExtendedMessage]: e.message,
+              [LogContextKey.ExtendedMessage]: responseText,
               [LogContextKey.ApiUrl]:
                 integrationContext.configuration?.oauth_token_url
             });
           } else {
             userContext.refreshErrorCount =
               (userContext.refreshErrorCount || 0) + 1;
+            const msg = `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`;
             userContext.status = 'refresh_error';
-            userContext.lastRefreshError = e.message;
+            userContext.lastRefreshError = msg;
             await this.saveUser(integrationContext, userContext);
-            throw createHttpError(
-              StatusCodes.UNAUTHORIZED,
-              `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`,
-              {
-                [LogContextKey.ExtendedMessage]: e.message,
-                [LogContextKey.ApiUrl]:
-                  integrationContext.configuration?.oauth_token_url
-              }
-            );
+            throw createHttpError(StatusCodes.UNAUTHORIZED, msg, {
+              [LogContextKey.ExtendedMessage]: responseText,
+              [LogContextKey.ApiUrl]:
+                integrationContext.configuration?.oauth_token_url
+            });
           }
         }
       }
@@ -590,6 +616,8 @@ export class OAuthConnector {
         ATTEMPTS LEFT: ${count}`
       );
       if (!(count > 0)) {
+        userContext.status = 'refresh_error';
+        await this.saveUser(integrationContext, userContext);
         throw new Error(
           `Error refreshing access token. Waiting for the access token to be refreshed exceeded the maximum time`
         );
@@ -605,6 +633,13 @@ export class OAuthConnector {
             if (!newUserContext || newUserContext.status === 'refresh_error') {
               throw new Error(
                 `Concurrent access token refresh operation failed`
+              );
+            }
+
+            if (newUserContext.status === 'refresh_failed') {
+              throw createHttpError(
+                StatusCodes.UNAUTHORIZED,
+                expiredRefreshTokenMessage
               );
             }
           } catch (e: any) {

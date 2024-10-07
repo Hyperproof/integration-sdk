@@ -35,11 +35,12 @@ export interface IHyperproofUser extends ISystemObject {
 }
 
 export interface IExternalUser {
-  id?: string;
+  id: string;
   givenName: string;
-  surname: string;
+  surname?: string;
   email?: string;
   resource?: string;
+  avatarUrl?: string;
 }
 
 export interface ICommentBody {

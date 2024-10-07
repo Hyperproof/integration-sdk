@@ -1,3 +1,4 @@
+import { getAsyncStore } from './asyncStore';
 import { Logger } from './hyperproof-api';
 import { HttpMethod, LogContextKey } from './models';
 import { IThrottleModel, ThrottleManager } from './util';
@@ -46,7 +47,7 @@ export interface IApiClientResponse<T = any> {
  */
 export class ApiClient {
   protected baseUrl?: string;
-  protected commonHeaders: HeadersInit;
+  protected headers: HeadersInit;
   private throttleManager: ThrottleManager<
     ApiClientRequestArgs,
     ResponseWithApiUrl
@@ -68,7 +69,12 @@ export class ApiClient {
     baseUrl?: string,
     throttleModel?: IThrottleModel
   ) {
-    this.commonHeaders = commonHeaders;
+    const store = getAsyncStore();
+    if (store?.externalServiceHeaders) {
+      this.headers = { ...commonHeaders, ...store.externalServiceHeaders };
+    } else {
+      this.headers = commonHeaders;
+    }
     this.baseUrl = baseUrl;
     this.throttleManager = new ThrottleManager(
       params => this.buildApiUrlAndFetch(...params),
@@ -89,19 +95,23 @@ export class ApiClient {
       url,
       HttpMethod.GET,
       undefined,
-      { ...this.commonHeaders, ...additionalHeaders },
+      { ...this.headers, ...additionalHeaders },
       abortController
     ]);
 
     return response;
   }
 
-  public async getJson(url: string, abortController?: AbortController) {
+  public async getJson(
+    url: string,
+    headers?: { [key: string]: string },
+    abortController?: AbortController
+  ) {
     return this.doSendRequest(
       url,
       HttpMethod.GET,
       undefined,
-      undefined,
+      headers,
       abortController
     );
   }
@@ -109,13 +119,14 @@ export class ApiClient {
   public async postJson(
     url: string,
     body?: object | string,
+    headers?: { [key: string]: string },
     abortController?: AbortController
   ) {
     return this.doSendRequest(
       url,
       HttpMethod.POST,
       body,
-      undefined,
+      headers,
       abortController
     );
   }
@@ -123,13 +134,14 @@ export class ApiClient {
   public async patchJson(
     url: string,
     body?: object | string,
+    headers?: { [key: string]: string },
     abortController?: AbortController
   ) {
     return this.doSendRequest(
       url,
       HttpMethod.PATCH,
       body,
-      undefined,
+      headers,
       abortController
     );
   }
@@ -148,6 +160,33 @@ export class ApiClient {
     );
   }
 
+  protected async parseResponseBodyJson(
+    response: Response,
+    url: string
+  ): Promise<string | undefined> {
+    let json: string | undefined;
+    const text = await response.text();
+    if (text.length === 0) {
+      return;
+    }
+    try {
+      json = JSON.parse(text);
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    } catch (e: any) {
+      throw createHttpError(
+        StatusCodes.INTERNAL_SERVER_ERROR,
+        'Failed to convert response body to JSON',
+        {
+          [LogContextKey.Headers]: response.headers.raw(),
+          [LogContextKey.StatusCode]: response.status,
+          [LogContextKey.ApiUrl]: url,
+          [LogContextKey.ExtendedMessage]: `Response Body: ${text}`
+        }
+      );
+    }
+    return json;
+  }
+
   public sendRequest(...params: ApiClientRequestArgs) {
     return this.doSendRequest(...params);
   }
@@ -161,6 +200,7 @@ export class ApiClient {
       abortController
     ]: ApiClientRequestArgs
   ): Promise<IApiClientResponse> {
+    // By default, throttleManager calls buildApiUrlAndFetch() to make the request.
     const { response, apiUrl } = await this.throttleManager.retrieve([
       url,
       method,
@@ -169,24 +209,7 @@ export class ApiClient {
       abortController
     ]);
 
-    let json: any = undefined;
-    const text = await response.text();
-    if (text.length > 0) {
-      try {
-        json = JSON.parse(text);
-      } catch (e: any) {
-        throw createHttpError(
-          StatusCodes.INTERNAL_SERVER_ERROR,
-          'Failed to convert response body to JSON',
-          {
-            [LogContextKey.Headers]: response.headers.raw(),
-            [LogContextKey.StatusCode]: response.status,
-            [LogContextKey.ApiUrl]: url,
-            [LogContextKey.ExtendedMessage]: `Response Body: ${text}`
-          }
-        );
-      }
-    }
+    const json = await this.parseResponseBodyJson(response, url);
 
     return {
       source: apiUrl,
@@ -206,21 +229,22 @@ export class ApiClient {
     ]: ApiClientRequestArgs
   ): Promise<ResponseWithApiUrl> {
     const apiUrl = this.buildUrl(url);
-    await Logger.debug(`Making ${method} request to ${apiUrl}`);
+    const headers = { ...this.headers, ...additionalHeaders };
+    const headerNames = Object.keys(headers);
+    await Logger.info(
+      `Making ${method} request to ${apiUrl}. Header names: ${headerNames}`
+    );
     const response = await fetch(apiUrl, {
       method,
-      headers: {
-        ...this.commonHeaders,
-        ...additionalHeaders
-      },
+      headers,
       body: typeof body === 'string' ? body : JSON.stringify(body),
-      signal: abortController?.signal
+      signal: abortController?.signal as AbortSignal | undefined
     });
     if (!response.ok) {
       await this.handleFailedResponse(response, apiUrl);
     }
 
-    await Logger.debug(`${url} returned ${response.status}`);
+    await Logger.info(`${url} returned ${response.status}`);
 
     return { response, apiUrl };
   }

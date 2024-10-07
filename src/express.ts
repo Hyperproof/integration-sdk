@@ -10,9 +10,5 @@ declare global {
       fusebit: IntegrationContext;
       userContext?: UserContext;
     }
-
-    type ParsedQs = {
-      [key: string]: undefined | string | string[] | ParsedQs | ParsedQs[];
-    };
   }
 }
