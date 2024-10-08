@@ -11,6 +11,8 @@ SDK for building integrations in Hyperproof.
 - Update Express to version 4.21.0
 - Update Superagent to version 10.1.0
 - Update other dependencies to latest versions
+- Improvements to logging and error handling
+- Various bug fixes
 
 ### 1.1.2
 
