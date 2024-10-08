@@ -9,7 +9,8 @@ import {
   AuthorizationType,
   IAuthorizationConfig,
   IAuthorizationConfigBase,
-  InstanceType
+  InstanceType,
+  LogContextKey
 } from '../models';
 import { TraceParent } from '../TraceParent';
 import { formatUserKey } from '../util';
@@ -147,38 +148,42 @@ export const getHyperproofAccessToken = async (
   await Logger.info(
     'Exchanging Hyperproof authorization code for an access token.'
   );
-  const response = await Superagent.post(
-    process.env.hyperproof_oauth_token_url!
-  )
-    .type('form')
-    .set(TraceParent.getHeaders())
-    .send({
-      grant_type: 'authorization_code',
-      code: authorizationCode,
-      client_id: process.env.hyperproof_oauth_client_id,
-      client_secret: hyperproofClientSecret,
-      redirect_uri: getHyperproofRedirectUrl(integrationContext)
-    });
-  const hyperproofToken: IHyperproofUserToken = response.body;
-  setExpiresAt(hyperproofToken);
+  try {
+    const response = await Superagent.post(
+      process.env.hyperproof_oauth_token_url!
+    )
+      .type('form')
+      .set({ ...TraceParent.getHeaders() })
+      .send({
+        grant_type: 'authorization_code',
+        code: authorizationCode,
+        client_id: process.env.hyperproof_oauth_client_id,
+        client_secret: hyperproofClientSecret,
+        redirect_uri: getHyperproofRedirectUrl(integrationContext)
+      });
+    const hyperproofToken: IHyperproofUserToken = response.body;
+    setExpiresAt(hyperproofToken);
 
-  // Save the token along with some user information in integration storage.
-  const hpUserContext = {
-    orgId,
-    userId,
-    hyperproofToken,
-    vendorUserIds: [vendorUserId]
-  };
-  await integrationContext.storage.put(
-    { data: hpUserContext },
-    `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
+    // Save the token along with some user information in integration storage.
+    const hpUserContext = {
       orgId,
       userId,
-      instanceType
-    )}`
-  );
-
-  return hpUserContext;
+      hyperproofToken,
+      vendorUserIds: [vendorUserId]
+    };
+    await integrationContext.storage.put(
+      { data: hpUserContext },
+      `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
+        orgId,
+        userId,
+        instanceType
+      )}`
+    );
+    return hpUserContext;
+  } catch (err) {
+    await Logger.error(err);
+    throw err;
+  }
 };
 
 /**
@@ -199,7 +204,7 @@ const refreshHyperproofAccessToken = async (
     process.env.hyperproof_oauth_token_url!
   )
     .type('form')
-    .set(TraceParent.getHeaders())
+    .set({ ...TraceParent.getHeaders() })
     .send({
       grant_type: 'refresh_token',
       refresh_token: hpUserContext.hyperproofToken.refresh_token,
@@ -284,7 +289,14 @@ export const ensureHyperproofAccessToken = async (
         );
       });
     } else {
-      throw err;
+      throw createHttpError(
+        StatusCodes.UNAUTHORIZED,
+        'Hyperproof access token refresh failed. Please try re-creating your connection.',
+        {
+          [LogContextKey.StatusCode]: err.status,
+          [LogContextKey.ExtendedMessage]: err.message
+        }
+      );
     }
   }
   setExpiresAt(hpUserContext.hyperproofToken);

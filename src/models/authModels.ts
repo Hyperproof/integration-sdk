@@ -1,6 +1,6 @@
 import { CredentialFieldType } from './credentials';
 import { AuthorizationType } from './enums';
-import { ISelectOption } from './hyperproofApiModels';
+import { ISelectOption, IValidation } from './hyperproofApiModels';
 
 /**
  * Metadata for a field that is used to provide credentials in a custom
@@ -15,6 +15,7 @@ export interface ICredentialField {
   fields?: ICredentialField[];
   value?: string;
   isDisabled?: boolean;
+  validation?: IValidation;
 }
 
 export interface ICredentialsMetadata {

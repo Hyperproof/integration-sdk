@@ -130,6 +130,7 @@ export enum HttpHeader {
   Baggage = 'baggage',
   ContentLength = 'Content-Length',
   ContentType = 'Content-Type',
+  ExternalServiceHeaders = 'hp-external-service-headers',
   HyperproofClientSecret = 'hp-client-secret',
   SubscriptionKey = 'hyperproof-subscription-key',
   TraceParent = 'traceparent'

@@ -157,6 +157,7 @@ export const getInputs = (
     data = ctx.query?.data
       ? deserializeState<FunctionData>(ctx.query.data as string)
       : {};
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
   } catch (e) {
     throw { status: 400, message: `Malformed 'data' parameter` };
   }
@@ -196,6 +197,7 @@ export const getInputs = (
     // Continuation of the add-on component interaction (e.g. form post from a settings manager)
     try {
       return [deserializeState(ctx.query.state as string), data];
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
     } catch (e) {
       throw { status: 400, message: `Malformed 'state' parameter` };
     }
@@ -324,6 +326,7 @@ export const createFunction = async (
     if (functionCreated) {
       try {
         await deleteFunction(ctx, accessToken);
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
       } catch (_) {
         /** Swallow the error */
       }

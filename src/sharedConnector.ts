@@ -1,6 +1,7 @@
+/* eslint-disable max-lines-per-function */
 import * as express from 'express';
 import { debug, IntegrationContext } from './add-on-sdk';
-import { asyncLocalStorage } from './asyncStore';
+import { asyncLocalStorage, IAsyncStore } from './asyncStore';
 import {
   getHyperproofAccessToken,
   getHyperproofAuthConfig,
@@ -33,6 +34,7 @@ import fs from 'fs';
 import createHttpError, { HttpError } from 'http-errors';
 import { StatusCodes } from 'http-status-codes';
 import path from 'path';
+import { ParsedQs } from 'qs';
 
 /**
  * Representation of a user's connection to an external service.
@@ -204,61 +206,32 @@ export function createConnector(superclass: typeof OAuthConnector) {
       super.onCreate(app);
 
       /**
-       * Sets up the logger instance and logs that a request was received.
+       * Sets up the execution context and logs that a request was received.
+       *
+       * It would be nice to be able to add additional logging in the response's
+       * finish event (i.e. use res.on('finish'...)) but our asynchronous logging
+       * does not complete reliably in this case--the connection to Hyperproof is
+       * often disconnected.
        */
       app.use(async (req, res, next) => {
         // When Hyperproof sends a request to an integration it includes the public API
         // subscription key and the Hyperproof OAuth client secret as headers.  If
         // these values are present in the request, stash them away for future use.
-        const subscriptionKey = req.headers[
-          HttpHeader.SubscriptionKey
-        ] as string;
-        const clientSecret = req.headers[
-          HttpHeader.HyperproofClientSecret
-        ] as string;
+        const subscriptionKey = this.getHeader(req, HttpHeader.SubscriptionKey);
         if (subscriptionKey) {
           HyperproofApiClient.setSubscriptionKey(subscriptionKey);
         }
-        if (clientSecret) {
-          setHyperproofClientSecret(clientSecret);
-        }
-
-        // Split up the URL and look for the orgId and/or userId params.
-        let orgId: string | undefined;
-        let userId: string | undefined;
-        const parts = req.url.split('/');
-        for (let i = 0; i < parts.length - 1; i++) {
-          if (parts[i] === 'organizations') {
-            orgId = parts[i + 1];
-          }
-          if (parts[i] === 'users') {
-            userId = parts[i + 1];
-          }
-        }
-
-        const baggage = this.getHeader(req, HttpHeader.Baggage);
-        const traceParent = this.getHeader(req, HttpHeader.TraceParent);
-
         Logger.init(
           subscriptionKey ?? process.env.hyperproof_api_subscription_key
         );
-        const loggerContext: LoggerContext = {
-          [LoggerContextKey.IntegrationType]: this.integrationType,
-          [LoggerContextKey.OrgId]: orgId,
-          [LoggerContextKey.UserId]: userId
-        };
 
-        // It would be nice to be able to add additional logging in the response's
-        // finish event (i.e. use res.on('finish'...)) but our asynchronous logging
-        // does not complete reliably in this case--the connection to Hyperproof is
-        // often disconnected.
-        asyncLocalStorage.run(
-          { baggage, traceParent, loggerContext },
-          async () => {
-            await Logger.info(`${req.method} ${req.originalUrl}`);
-            next();
-          }
-        );
+        this.setHyperproofClientSecret(req);
+
+        const asyncLocalStore = await this.createAsyncLocalStorageContext(req);
+        asyncLocalStorage.run(asyncLocalStore, async () => {
+          await Logger.info(`${req.method} ${req.originalUrl}`);
+          next();
+        });
       });
 
       /**
@@ -503,7 +476,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
      * Whether this connector only communicates outbound from hyperproof. By default all connectors are 2 way
      */
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    outboundOnly(integrationType: string, meta: Express.ParsedQs) {
+    outboundOnly(integrationType: string, meta: ParsedQs) {
       return false;
     }
 
@@ -563,7 +536,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       config: IAuthorizationConfigBase,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      meta: Express.ParsedQs
+      meta: ParsedQs
     ): void {
       // custom auth apps can override this method to add fields to intake user credentials
     }
@@ -825,9 +798,69 @@ export function createConnector(superclass: typeof OAuthConnector) {
       return absolutePath;
     }
 
-    getHeader(req: any, headerName: string) {
+    setHyperproofClientSecret(req: express.Request) {
+      const clientSecret = this.getHeader(
+        req,
+        HttpHeader.HyperproofClientSecret
+      );
+      if (clientSecret) {
+        setHyperproofClientSecret(clientSecret);
+      }
+    }
+
+    async createAsyncLocalStorageContext(
+      req: express.Request
+    ): Promise<IAsyncStore> {
+      const baggage = this.getHeader(req, HttpHeader.Baggage);
+      const traceParent = this.getHeader(req, HttpHeader.TraceParent);
+
+      const { orgId, userId } = this.getIdsFromUrl(req.url);
+      const loggerContext: LoggerContext = {
+        [LoggerContextKey.IntegrationType]: this.integrationType,
+        [LoggerContextKey.OrgId]: orgId,
+        [LoggerContextKey.UserId]: userId
+      };
+
+      const externalServiceHeaders = await this.getExternalServiceHeaders(req);
+
+      return { baggage, traceParent, loggerContext, externalServiceHeaders };
+    }
+
+    async getExternalServiceHeaders(
+      req: express.Request
+    ): Promise<{ [key: string]: string } | undefined> {
+      const encodedExternalServiceHeaders = this.getHeader(
+        req,
+        HttpHeader.ExternalServiceHeaders
+      );
+      try {
+        return encodedExternalServiceHeaders
+          ? JSON.parse(decodeURIComponent(encodedExternalServiceHeaders))
+          : undefined;
+      } catch (e: any) {
+        await Logger.error(`Failed to parse external service headers`, e);
+      }
+    }
+
+    getHeader(req: express.Request, headerName: HttpHeader) {
       const header = req.headers[headerName];
       return Array.isArray(header) ? header[0] : header;
+    }
+
+    getIdsFromUrl(url: string) {
+      let orgId: string | undefined;
+      let userId: string | undefined;
+      const parts = url.split('/');
+
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (parts[i] === 'organizations') {
+          orgId = parts[i + 1];
+        } else if (parts[i] === 'users') {
+          userId = parts[i + 1];
+        }
+      }
+
+      return { orgId, userId };
     }
   };
 }

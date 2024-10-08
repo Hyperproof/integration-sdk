@@ -3,14 +3,15 @@ import { LoggerContext } from './hyperproof-api';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
- * We use AsyncLocalStorage to store logging and tracing information
- * for the requests that are processsed by a connector.
+ * The AsyncLocalStorage contains globally-accessible information
+ * that is specific to the current execution context/request
  */
 
 export interface IAsyncStore {
   baggage?: string | undefined;
   traceParent?: string | undefined;
   loggerContext?: LoggerContext;
+  externalServiceHeaders?: { [key: string]: string };
 }
 
 declare global {

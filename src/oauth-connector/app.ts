@@ -117,7 +117,7 @@ export const createApp = (connector: OAuthConnector) => {
         );
       }
       res.status(response.status || 200);
-      response.body ? res.json(response.body) : res.end();
+      return response.body ? res.json(response.body) : res.end();
     }
   );
 
@@ -177,7 +177,7 @@ export const createApp = (connector: OAuthConnector) => {
         res.set(h, response.headers[h]);
       }
     }
-    response.body ? res.send(response.body) : res.end();
+    return response.body ? res.send(response.body) : res.end();
   });
 
   connector.onCreate(app);
