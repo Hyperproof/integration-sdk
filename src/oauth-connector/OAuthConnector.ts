@@ -4,6 +4,7 @@ import { StatusCodes } from 'http-status-codes';
 import Superagent from 'superagent';
 
 import { IntegrationContext } from '../add-on-sdk';
+import { getAgent } from '../agent';
 import { Logger } from '../hyperproof-api';
 import { LogContextKey } from '../models';
 
@@ -26,15 +27,7 @@ export interface UserContext<TVendorUserProfile = { [key: string]: any }> {
   timestamp: number;
   vendorUserId: string;
   vendorUserProfile: TVendorUserProfile;
-  vendorToken?: {
-    scope: string;
-    expires_at: number;
-    expires_in: number;
-    token_type: string;
-    access_token: string;
-    refresh_token: string;
-    ext_expires_in: number;
-  };
+  vendorToken?: VendorToken;
   foreignOAuthIdentities?: {
     [key: string]: {
       userId: string;
@@ -44,6 +37,16 @@ export interface UserContext<TVendorUserProfile = { [key: string]: any }> {
   lastRefreshStarted?: number;
   lastRefreshError?: any;
   refreshErrorCount?: number;
+}
+
+export interface VendorToken {
+  scope: string;
+  expires_at: number;
+  expires_in: number;
+  token_type: string;
+  access_token: string;
+  refresh_token: string;
+  ext_expires_in: number;
 }
 
 export class OAuthConnector {
@@ -62,7 +65,7 @@ export class OAuthConnector {
     this.accessTokenExpirationBuffer = 30000;
 
     /**
-     * If refreshing an access token fails for refreshErrorLimit of consecutive times, the user is deleted.
+     * Not currently in use
      */
     this.refreshErrorLimit = 10;
 
@@ -216,9 +219,9 @@ export class OAuthConnector {
     authorizationCode: string,
     redirectUri: string
   ) {
-    const response = await Superagent.post(
-      integrationContext.configuration.oauth_token_url
-    )
+    const url = integrationContext.configuration.oauth_token_url;
+    const response = await Superagent.post(url)
+      .agent(getAgent(url))
       .type('form')
       .send({
         grant_type: 'authorization_code',
@@ -242,9 +245,9 @@ export class OAuthConnector {
     redirectUri: string
   ) {
     const currentRefreshToken = tokenContext.refresh_token;
-    const response = await Superagent.post(
-      integrationContext.configuration.oauth_token_url
-    )
+    const url = integrationContext.configuration.oauth_token_url;
+    const response = await Superagent.post(url)
+      .agent(getAgent(url))
       .type('form')
       .send({
         grant_type: 'refresh_token',
@@ -330,7 +333,7 @@ export class OAuthConnector {
   }
 
   /**
-   * Called after a new user successfuly completed a configuration flow and was persisted in the system. This extensibility
+   * Called after a new user successfully completed a configuration flow and was persisted in the system. This extensibility
    * point allows for creation of any artifacts required to serve this new user, for example creation of additional
    * Fusebit functions.
    * @param {IntegrationContext} integrationContext The integration context of the request
@@ -435,6 +438,9 @@ export class OAuthConnector {
     vendorUserId: string,
     vendorId?: string
   ) {
+    await Logger.debug(
+      `(OauthConnector) Deleting user with vendorUserId: ${vendorUserId}, vendorId: ${vendorId}`
+    );
     const userContext = await this.getUser(
       integrationContext,
       vendorUserId,
@@ -501,14 +507,15 @@ export class OAuthConnector {
       );
       if (oauthIdentity) {
         try {
-          const response = await Superagent.get(
-            `${oauthIdentity.connectorBaseUrl}/user/${encodeURIComponent(
-              oauthIdentity.userId
-            )}/token`
-          ).set(
-            'Authorization',
-            `Bearer ${integrationContext.fusebit.functionAccessToken}`
-          );
+          const url = `${
+            oauthIdentity.connectorBaseUrl
+          }/user/${encodeURIComponent(oauthIdentity.userId)}/token`;
+          const response = await Superagent.get(url)
+            .agent(getAgent(url))
+            .set(
+              'Authorization',
+              `Bearer ${integrationContext.fusebit.functionAccessToken}`
+            );
           return response.body;
         } catch (e: any) {
           throw new Error(
@@ -523,28 +530,16 @@ export class OAuthConnector {
     };
 
     const ensureLocalAccessToken = async () => {
-      if (
-        userContext.vendorToken?.access_token &&
-        (userContext.vendorToken.expires_at === undefined ||
-          userContext.vendorToken.expires_at >
-            Date.now() + this.accessTokenExpirationBuffer)
-      ) {
+      if (this.isAccessTokenActive(userContext.vendorToken)) {
+        // Token is valid
         await Logger.info(
           `RETURNING CURRENT ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
         );
         return userContext.vendorToken;
       }
-      if (userContext.status === 'refresh_failed') {
-        await Logger.error(
-          `EXPIRED ACCESS TOKEN FOR USER ${userContext.vendorUserId}, THROWING UNAUTHORIZED`
-        );
-        throw createHttpError(
-          StatusCodes.UNAUTHORIZED,
-          expiredRefreshTokenMessage
-        );
-      }
 
       if (userContext.vendorToken?.refresh_token) {
+        // Token needs refresh
         await Logger.info(
           `REFRESHING ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
         );
@@ -572,12 +567,14 @@ export class OAuthConnector {
           await this.saveUser(integrationContext, userContext);
           return userContext.vendorToken;
         } catch (e: any) {
+          // Token refresh failed
           const responseText = e.response?.text;
           if (
             userContext.refreshErrorCount &&
             userContext.refreshErrorCount > this.refreshErrorLimit
           ) {
-            const msg = `Credential "${userContext.vendorUserId}" has expired. This may be resolved by reauthorizing the connection. Unable to refresh token after ${this.refreshErrorLimit} attempts: ${e.message}`;
+            // At or above maximum refresh attempts
+            const msg = `Credential "${userContext.vendorUserId}" may have expired. This can be resolved by reauthorizing the connection. Error: ${e.message}`;
             userContext.status = 'refresh_failed';
             userContext.lastRefreshError = msg;
             await this.saveUser(integrationContext, userContext);
@@ -588,9 +585,10 @@ export class OAuthConnector {
                 integrationContext.configuration?.oauth_token_url
             });
           } else {
+            // Increment refresh failure counter
             userContext.refreshErrorCount =
               (userContext.refreshErrorCount || 0) + 1;
-            const msg = `Error refreshing access token, attempt ${userContext.refreshErrorCount} out of ${this.refreshErrorLimit}: ${e.message}`;
+            const msg = `Error refreshing access token, attempt ${userContext.refreshErrorCount}: ${e.message}`;
             userContext.status = 'refresh_error';
             userContext.lastRefreshError = msg;
             await this.saveUser(integrationContext, userContext);
@@ -688,6 +686,17 @@ export class OAuthConnector {
         return ensureLocalAccessToken();
       }
     }
+  }
+
+  /**
+   * Evaluate whether the vendorToken.access_token is ready to use or not
+   */
+  public isAccessTokenActive(vendorToken?: VendorToken): boolean {
+    return (
+      vendorToken?.access_token !== undefined &&
+      (vendorToken.expires_at === undefined ||
+        vendorToken.expires_at > Date.now() + this.accessTokenExpirationBuffer)
+    );
   }
 
   getStorageIdForVendorUser(id: string, foreignVendorId?: string) {

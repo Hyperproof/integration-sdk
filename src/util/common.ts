@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 import {
   debug,
   IntegrationContext,
@@ -312,3 +314,11 @@ export const pickProps = (
  * Removes any leading or trailing whitespace and trailing slashes from a URL
  */
 export const trimUrl = (url: string) => url.trim().replace(/\/+$/, '');
+
+/**
+ * Utility function to hash strings
+ * @param toHash string to hash
+ * @returns a hashed string
+ */
+export const computeHash = (toHash: string) =>
+  crypto.createHash('sha256').update(toHash).digest('base64url');

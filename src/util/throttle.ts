@@ -114,9 +114,16 @@ export class ThrottleManager<RequestType, ResponseType> {
    * @throws {ExternalAPIError} Any exception thrown by `_sendRequest()` is wrapped with an
    *         `ExternalAPIError` instance and propagated.
    */
-  async retrieve(request: RequestType): Promise<ResponseType> {
+  async retrieve(
+    request: RequestType,
+    logger?: (response: any) => void
+  ): Promise<ResponseType> {
     try {
-      return await this._sendRequest(request);
+      const response = await this._sendRequest(request);
+      if (logger) {
+        logger(response);
+      }
+      return response;
     } catch (e: any) {
       throw this._makeError(e);
     }
@@ -177,7 +184,6 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
       [
         StatusCodes.TOO_MANY_REQUESTS,
         StatusCodes.GATEWAY_TIMEOUT,
-        StatusCodes.BAD_GATEWAY,
         StatusCodes.SERVICE_UNAVAILABLE
       ].includes(this.responseCode ?? 0) ||
       /rate limit/i.test(this.message) ||
@@ -271,7 +277,10 @@ const jitteredBackoff = (
  * @returns The first non-undefined attribute with one of the possible names found in one
  *          of the targets, or `undefined` if no such attribute was found.
  */
-const findAttr = (possibleNames: (string | undefined)[], ...targets: any[]) => {
+export const findAttr = (
+  possibleNames: (string | undefined)[],
+  ...targets: any[]
+) => {
   const lowercaseNames = possibleNames.map(name => name?.toLowerCase());
   for (const target of targets) {
     if (target) {

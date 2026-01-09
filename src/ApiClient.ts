@@ -1,10 +1,11 @@
+import { createFetchOptions } from './agent';
 import { getAsyncStore } from './asyncStore';
 import { Logger } from './hyperproof-api';
 import { HttpMethod, LogContextKey } from './models';
 import { IThrottleModel, ThrottleManager } from './util';
 
 import AbortController from 'abort-controller';
-import createHttpError from 'http-errors';
+import createHttpError, { HttpError } from 'http-errors';
 import { StatusCodes } from 'http-status-codes';
 import fetch, { HeadersInit, Response } from 'node-fetch';
 
@@ -17,13 +18,14 @@ import fetch, { HeadersInit, Response } from 'node-fetch';
  * @property additionalHeaders Additional headers to merge with the client's `commonHeaders` for the
  *           request.
  */
-type ApiClientRequestArgs = [
-  url: string,
-  method: string,
-  body?: object | string,
-  additionalHeaders?: HeadersInit,
-  abortController?: AbortController
-];
+interface ApiClientRequestArgs {
+  url: string;
+  method: string;
+  body?: object | string;
+  additionalHeaders?: HeadersInit;
+  abortController?: AbortController;
+  isAbsoluteUrl?: boolean;
+}
 
 /**
  * Type alias for the set of response headers that are returned from a request.
@@ -40,6 +42,13 @@ export interface IApiClientResponse<T = any> {
   json: T;
   headers: ResponseHeaders;
   status: number;
+}
+
+export interface IErrorMessagePattern {
+  name: string;
+  messageMatch: RegExp;
+  fromStatus?: string;
+  toStatus: number;
 }
 
 /**
@@ -77,7 +86,7 @@ export class ApiClient {
     }
     this.baseUrl = baseUrl;
     this.throttleManager = new ThrottleManager(
-      params => this.buildApiUrlAndFetch(...params),
+      params => this.buildApiUrlAndFetch({ ...params }),
       throttleModel
     );
   }
@@ -86,19 +95,24 @@ export class ApiClient {
     this.throttleManager.setRetryCount(retryCount);
   }
 
-  public async getNonProcessedResponse(
+  public setBaseUrl(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
+
+  public async getUnprocessedResponse(
     url: string,
     additionalHeaders?: HeadersInit,
+    isAbsoluteUrl = false,
     abortController?: AbortController
   ): Promise<Response> {
-    const { response } = await this.throttleManager.retrieve([
+    const { response } = await this.buildApiUrlAndFetch({
       url,
-      HttpMethod.GET,
-      undefined,
-      { ...this.headers, ...additionalHeaders },
-      abortController
-    ]);
-
+      method: HttpMethod.GET,
+      body: undefined,
+      additionalHeaders,
+      abortController,
+      isAbsoluteUrl
+    });
     return response;
   }
 
@@ -107,13 +121,13 @@ export class ApiClient {
     headers?: { [key: string]: string },
     abortController?: AbortController
   ) {
-    return this.doSendRequest(
+    return this.doSendRequest({
       url,
-      HttpMethod.GET,
-      undefined,
-      headers,
+      method: HttpMethod.GET,
+      body: undefined,
+      additionalHeaders: headers,
       abortController
-    );
+    });
   }
 
   public async postJson(
@@ -122,13 +136,13 @@ export class ApiClient {
     headers?: { [key: string]: string },
     abortController?: AbortController
   ) {
-    return this.doSendRequest(
+    return this.doSendRequest({
       url,
-      HttpMethod.POST,
+      method: HttpMethod.POST,
       body,
-      headers,
+      additionalHeaders: headers,
       abortController
-    );
+    });
   }
 
   public async patchJson(
@@ -137,19 +151,110 @@ export class ApiClient {
     headers?: { [key: string]: string },
     abortController?: AbortController
   ) {
-    return this.doSendRequest(
+    return this.doSendRequest({
       url,
-      HttpMethod.PATCH,
+      method: HttpMethod.PATCH,
       body,
-      headers,
+      additionalHeaders: headers,
       abortController
+    });
+  }
+
+  public async putJson(
+    url: string,
+    body?: object | string,
+    headers?: { [key: string]: string },
+    abortController?: AbortController
+  ) {
+    return this.doSendRequest({
+      url,
+      method: HttpMethod.PUT,
+      body,
+      additionalHeaders: headers,
+      abortController
+    });
+  }
+
+  /**
+   * Maps error message patterns to appropriate HTTP status codes.
+   * Each pattern is a regex that will be tested against the error message.
+   *
+   * A connector can override this method to provide error message patterns
+   * that map to specific HTTP status codes that are specific to the
+   * handling of that connector and/or its target API.
+   *
+   * This will require the connector to implement its own ApiClient that
+   * extends this base ApiClient class, and pass via the data source contructor
+   * the custom ApiClient class to be used.
+   */
+  public getErrorMessageStatusPatterns(): IErrorMessagePattern[] {
+    return [
+      {
+        name: 'DNS Resolution Failure',
+        messageMatch: /request to.*getaddrinfo ENOTFOUND.*/i,
+        fromStatus: 'ENOTFOUND',
+        toStatus: StatusCodes.BAD_GATEWAY
+      }
+      // Add more global patterns here as needed
+    ];
+  }
+
+  protected async getStatusCodeFromErrorMessage(error?: any): Promise<number> {
+    const status: string =
+      error?.code?.toString() ||
+      error?.statusCode?.toString() ||
+      error?.status?.toString() ||
+      '';
+    const message: string = error?.message || '';
+
+    if (!status && !message) {
+      return StatusCodes.INTERNAL_SERVER_ERROR;
+    }
+
+    const patterns = this.getErrorMessageStatusPatterns();
+
+    for (const errorPattern of patterns) {
+      if (
+        (!errorPattern.fromStatus || errorPattern.fromStatus === status) &&
+        errorPattern.messageMatch.test(message)
+      ) {
+        await Logger.info(
+          `Mapped error status ${status} to status ${errorPattern.toStatus} using pattern ${errorPattern.name}`
+        );
+        return errorPattern.toStatus;
+      }
+    }
+
+    await Logger.warn(
+      `No matching error pattern found for error status: ${status}, message: ${message}`,
+      typeof error === 'object' ? JSON.stringify(error) : undefined
     );
+
+    return StatusCodes.INTERNAL_SERVER_ERROR;
+  }
+
+  protected async handleNetworkError(err: any): Promise<HttpError> {
+    const errorMessage = err.message || 'Network error occurred';
+    // If the error contains a statusCode, use it
+    if (Object.values(StatusCodes).includes(err.status)) {
+      return createHttpError(err.status, errorMessage, {
+        ...err
+      });
+    }
+
+    // Map known codes to statusCodes
+    const status = await this.getStatusCodeFromErrorMessage(err);
+
+    return createHttpError(status, errorMessage, {
+      ...err
+    });
   }
 
   protected async handleFailedResponse(response: Response, apiUrl: string) {
     const errMsg = await response.text();
+    await Logger.warn(`Error retrieving JSON from ${apiUrl}: ${errMsg}`);
     throw createHttpError(
-      response.status,
+      response.status ?? StatusCodes.INTERNAL_SERVER_ERROR,
       `Error retrieving JSON from ${apiUrl}: ${errMsg}`,
       {
         [LogContextKey.Headers]: response.headers.raw(),
@@ -160,11 +265,18 @@ export class ApiClient {
     );
   }
 
+  /**
+   * On a successful response, where response.ok is true, this method will be called
+   * to parse the body into a JSON object. Returns undefined when the body is empty.
+   */
   protected async parseResponseBodyJson(
     response: Response,
     url: string
-  ): Promise<string | undefined> {
-    let json: string | undefined;
+  ): Promise<any | undefined> {
+    if (response.status === StatusCodes.NO_CONTENT) {
+      return;
+    }
+    let json: any | undefined;
     const text = await response.text();
     if (text.length === 0) {
       return;
@@ -187,27 +299,25 @@ export class ApiClient {
     return json;
   }
 
-  public sendRequest(...params: ApiClientRequestArgs) {
-    return this.doSendRequest(...params);
+  public sendRequest(params: ApiClientRequestArgs) {
+    return this.doSendRequest(params);
   }
 
-  private async doSendRequest(
-    ...[
-      url,
-      method,
-      body,
-      additionalHeaders,
-      abortController
-    ]: ApiClientRequestArgs
-  ): Promise<IApiClientResponse> {
+  private async doSendRequest({
+    url,
+    method,
+    body,
+    additionalHeaders,
+    abortController
+  }: ApiClientRequestArgs): Promise<IApiClientResponse> {
     // By default, throttleManager calls buildApiUrlAndFetch() to make the request.
-    const { response, apiUrl } = await this.throttleManager.retrieve([
+    const { response, apiUrl } = await this.throttleManager.retrieve({
       url,
       method,
       body,
       additionalHeaders,
       abortController
-    ]);
+    });
 
     const json = await this.parseResponseBodyJson(response, url);
 
@@ -219,33 +329,45 @@ export class ApiClient {
     };
   }
 
-  private async buildApiUrlAndFetch(
-    ...[
-      url,
-      method,
-      body,
-      additionalHeaders,
-      abortController
-    ]: ApiClientRequestArgs
-  ): Promise<ResponseWithApiUrl> {
-    const apiUrl = this.buildUrl(url);
+  private async buildApiUrlAndFetch({
+    url,
+    method,
+    body,
+    additionalHeaders,
+    abortController,
+    isAbsoluteUrl
+  }: ApiClientRequestArgs): Promise<ResponseWithApiUrl> {
+    const apiUrl = isAbsoluteUrl ? url : this.buildUrl(url);
     const headers = { ...this.headers, ...additionalHeaders };
     const headerNames = Object.keys(headers);
+
     await Logger.info(
       `Making ${method} request to ${apiUrl}. Header names: ${headerNames}`
     );
-    const response = await fetch(apiUrl, {
-      method,
-      headers,
-      body: typeof body === 'string' ? body : JSON.stringify(body),
-      signal: abortController?.signal as AbortSignal | undefined
-    });
+
+    let response: Response;
+    try {
+      response = await fetch(
+        apiUrl,
+        createFetchOptions(apiUrl, {
+          method,
+          headers,
+          body: typeof body === 'string' ? body : JSON.stringify(body),
+          signal: abortController?.signal as AbortSignal | undefined
+        })
+      );
+    } catch (err) {
+      // Complete failure to make the request
+      throw await this.handleNetworkError(err);
+    }
+
     if (!response.ok) {
+      // Received a response with non-2xx statusCode
       await this.handleFailedResponse(response, apiUrl);
     }
 
-    await Logger.info(`${url} returned ${response.status}`);
-
+    // Successful response
+    await Logger.info(`Response from ${method} ${apiUrl}: ${response.status}`);
     return { response, apiUrl };
   }
 

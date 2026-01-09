@@ -1,6 +1,7 @@
 import fetch from 'node-fetch';
 
 import { debug } from '../add-on-sdk';
+import { createFetchOptions } from '../agent';
 import { getAsyncStore } from '../asyncStore';
 import { HttpHeader, MimeType } from '../models';
 import { TraceParent } from '../TraceParent';
@@ -161,15 +162,18 @@ export class Logger {
         stack
       };
 
-      const response = await fetch(url, {
-        method: 'POST',
-        body: JSON.stringify(logEvent),
-        headers: {
-          ...TraceParent.getHeaders(),
-          [HttpHeader.SubscriptionKey]: subscriptionKey,
-          [HttpHeader.ContentType]: MimeType.APPLICATION_JSON
-        }
-      });
+      const response = await fetch(
+        url,
+        createFetchOptions(url, {
+          method: 'POST',
+          body: JSON.stringify(logEvent),
+          headers: {
+            ...TraceParent.getHeaders(),
+            [HttpHeader.SubscriptionKey]: subscriptionKey,
+            [HttpHeader.ContentType]: MimeType.APPLICATION_JSON
+          }
+        })
+      );
       if (!response.ok) {
         // Swallow error. Failure to log should not take down the operation
         const text = await response.text();

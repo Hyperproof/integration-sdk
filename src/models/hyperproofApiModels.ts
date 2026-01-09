@@ -1,10 +1,4 @@
-import {
-  AppId,
-  HealthStatus,
-  ObjectStatus,
-  ObjectType,
-  Priority
-} from './enums';
+import { HealthStatus, ObjectStatus, ObjectType, Priority } from './enums';
 
 export interface IApiObject {
   id: string;
@@ -23,12 +17,15 @@ export interface IOrgObject extends ISystemObject {
   orgId: string;
 }
 
-export interface IHyperproofUser extends ISystemObject {
+export interface IHyperproofUser extends ISystemObject, ILocalizable {
   id: string;
   email: string;
   givenName: string;
   surname: string;
   updatedOn: string;
+}
+
+export interface ILocalizable {
   language: string;
   locale: string;
   timeZone: string;
@@ -43,11 +40,26 @@ export interface IExternalUser {
   avatarUrl?: string;
 }
 
+export interface IExternalGroup {
+  id: string;
+  name: string;
+  avatarUrl?: string;
+}
+
+export type ExternalPrincipal = IExternalUser | IExternalGroup;
+
+export interface IExternalGroupLink extends IOrgObject {
+  groupId?: string;
+  externalGroupId: string;
+  externalName: string;
+  instanceIntegrationId: string;
+}
+
 export interface ICommentBody {
-  appId: AppId;
-  commentTextFormatted: string;
-  externalUser: IExternalUser;
-  mentionedExternalUsers: IExternalUser[];
+  appId?: string;
+  commentTextFormatted?: string;
+  externalUser?: IExternalUser;
+  mentionedExternalUsers?: IExternalUser[];
   sourceCommentId: string;
   sourceUpdatedOn: string;
 }
@@ -67,11 +79,13 @@ export interface ITaskSyncState {
   status: ITaskFieldSyncState;
   dueDate: ITaskFieldSyncState;
   comment: ITaskFieldSyncState;
+  group: ITaskFieldSyncState;
 }
 
 export interface ITaskFieldSyncState {
   syncedOn?: string;
   syncResult?: TaskSyncResult;
+  externalGroupLinkId?: string;
   externalUserId?: string;
   failureMessage?: string;
 }
@@ -104,6 +118,39 @@ export interface IIntegration<
   settings: TIntegrationSettings;
 }
 
+export interface IIntegrationPostSystem {
+  orgId: string;
+  appId: string;
+  settings: IIntegrationSettingsBase;
+  parentObjectTypePlural: string;
+  parentObjectId: string;
+  exteralConnectionId?: string;
+}
+
+export interface IIntegrationFilterSystem {
+  appId: string;
+  orgId: string;
+  parentObjectTypePlural: string;
+  parentObjectId: string;
+}
+
+export interface IExternalConnectionPostSystem {
+  externalUserId: string;
+  appId: string;
+  name: string;
+  accountName: string;
+  userId: string;
+  hostUrl: string;
+}
+export interface IExternalConnectionFilterSystem {
+  appIds: string[];
+  externalUserId: string;
+  ownedBy?: string;
+  userId?: string;
+  hostUrl?: string;
+  includeArchived?: boolean;
+}
+
 export interface ITask extends IOrgObject {
   orgId: string;
   title: string;
@@ -125,24 +172,111 @@ export interface ITask extends IOrgObject {
   closedOn?: string;
 }
 
+export interface ITaskStatus extends IOrgObject {
+  name: string;
+  type: TaskStatusType;
+  sortOrder: number;
+  icon: string;
+  color: string;
+}
+
+export enum TaskStatusType {
+  NotStarted = 'notStarted',
+  InProgress = 'inProgress',
+  Submitted = 'submitted',
+  Closed = 'closed',
+  Cancelled = 'cancelled'
+}
+
+// Used for updating a Hyperproof task
 export interface ITaskPatch {
-  taskStatusId?: string;
-  priority?: Priority;
-  dueDate?: string;
   clearDueDate?: boolean;
+  clearGroupId?: boolean;
+  comments?: IActivity[];
   description?: string;
-  title?: string;
-  externalUser?: IExternalUser;
+  dueDate?: string;
   externalAssignee?: IExternalUser;
   externalFields?: any;
+  externalGroup?: IExternalGroup;
+  externalUser?: IExternalUser;
+  groupId?: string;
+  priority?: Priority;
+  taskStatusId?: string;
   taskTemplateId?: string;
+  ticketStatusId?: string;
+  title?: string;
+}
+
+// Updates from the Hyperproof Task that should be applied to the external ticket
+export interface ITicketPatch {
+  clearDueDate?: boolean;
   comments?: IActivity[];
-  externalUserLinkPairMap?: {
-    [userId: string]: {
-      externalUserLink?: IExternalUserLink;
-      organizationuser: IOrgUser;
-    };
+  description?: string;
+  dueDate?: string;
+  externalAssignee?: IExternalUser;
+  externalFields?: any;
+  externalGroupLink?: IExternalGroupLink;
+  externalUser?: IExternalUser;
+  externalUserLinkPairMap?: IExternalUserLinkPairMap;
+  externalUserLinks?: IExternalUserLink[];
+  group?: string;
+  priority?: Priority;
+  taskStatusId?: string;
+  taskTemplateId?: string;
+  ticketStatusId?: string;
+  title?: string;
+}
+
+export interface IExternalFields {
+  [id: string]: string | string[] | object | number;
+}
+
+export interface IExternalUserLinkPairMap {
+  [userId: string]: {
+    externalUserLink?: IExternalUserLink;
+    organizationUser: IOrgUser;
   };
+}
+
+export interface IProofPost extends IProofPostBase {
+  objectType: ObjectType;
+  objectId: string;
+}
+
+export interface IProofVersionPost extends IProofPostBase {
+  proofId: string;
+}
+
+export interface IProofPostBase {
+  file: Buffer;
+  filename: string;
+  mimeType: string;
+  sourceId?: string;
+  sourceFileId: string;
+  sourceModifiedOn?: string;
+  sourceIntegrationId?: string;
+  user?: IExternalUser;
+  size?: number;
+}
+
+export interface IProof extends IOrgObject {
+  version: number;
+  ownedBy: string;
+  uploadedOn: string;
+  source: string;
+  sourceId?: string;
+  sourceIntegrationId?: string;
+  integrationStatus: string;
+  sourceFileId?: string;
+  sourceModifiedOn?: string;
+  providedByExternalUserLinkId?: string;
+}
+
+export interface IArchiveProofLinkPost {
+  proofId: string;
+  objectId: string;
+  objectType: ObjectType;
+  externalUser?: IExternalUser;
 }
 
 export interface IActivity extends IOrgObject {
@@ -194,11 +328,30 @@ export interface ICheckConnectionHealthInvocationPayload {
 
 export interface ITestExternalPermissionsBody {
   appId: string;
+  projectId?: string;
+  hostUrl: string;
+  externalConnectionId: string;
+  adminExternalConnectionId: string;
+  vendorUserId: string;
+  adminVendorUserId: string;
   [key: string]: any;
 }
 
 export interface ITestExternalPermissionsResponse {
   permissions: IExternalPermission[];
+}
+
+/**
+ * Object returned from the validateCredentials method.
+ *
+ * Ideally all validateCredentials implementers would return only the vendorUserId
+ * and vendorUserProfile members.  But for historical reasons we also allow connectors
+ * to return other, arbitrary values which will be blended into the persisted user context.
+ */
+export interface IValidateCredentialsResponse {
+  vendorUserId: string;
+  vendorUserProfile?: object;
+  [key: string]: any;
 }
 
 export interface IExternalPermission {
@@ -207,45 +360,21 @@ export interface IExternalPermission {
   required?: boolean;
 }
 
-export interface IExTag {
-  id: string;
-  name: string;
-}
-
-/**
- * IMPORTANT!
- * Please keep the types below in sync with the same interface in
- * @hyperproof/hypersync-models.  We want to avoid a dependency
- * between the two libraries (hypersync-models is designed to
- * be small and light) but we definitely need the interfaces in
- * both places.
- */
-
 /**
  * An option that may be chosen in a select control.
+ *
+ * Please keep this in sync with the same interface in
+ * @hyperproof/hypersync-models.  We want to avoid a dependency
+ * between the two libraries (hypersync-models is designed to
+ * be small and light) but we definitely need the interface in
+ * both places.
  */
 export interface ISelectOption {
   value: string | number;
   label: string;
 }
 
-export interface IValidation {
-  type: ValidationTypeString;
-  regex?: string;
-  errorMessage?: string;
+export interface IExTag {
+  id: string;
+  name: string;
 }
-
-export enum ValidationTypes {
-  alphaNumeric = 'alphaNumeric',
-  regex = 'regex',
-  url = 'url',
-  urlOrHost = 'urlOrHost',
-  uuid = 'uuid'
-}
-
-export type ValidationTypeString =
-  | 'alphaNumeric'
-  | 'regex'
-  | 'url'
-  | 'urlOrHost'
-  | 'uuid';

@@ -1,32 +1,19 @@
+/* eslint-env node */
+
 module.exports = {
-  env: {
-    browser: false,
-    commonjs: true,
-    es2021: true,
-    node: true
-  },
-  extends: [
-    'eslint:recommended',
-    'plugin:@typescript-eslint/recommended',
-    'prettier'
-  ],
-  parserOptions: {
-    ecmaVersion: 'latest'
-  },
-  plugins: ['@typescript-eslint'],
-  rules: {
-    '@typescript-eslint/no-non-null-assertion': 0,
-    '@typescript-eslint/ban-types': 0,
-    '@typescript-eslint/explicit-module-boundary-types': ['off'],
-    '@typescript-eslint/no-explicit-any': ['off']
-  },
   overrides: [
     {
-      files: ['*.js'],
+      files: ['*.ts'],
+      parser: '@typescript-eslint/parser',
+      parserOptions: {
+        ecmaVersion: 'latest',
+        project: `${__dirname}/tsconfig.json`
+      },
       rules: {
-        '@typescript-eslint/no-var-requires': 'off'
+        'max-lines-per-function': ['error', { max: 660, skipBlankLines: true }],
+        'max-depth': ['error', 6],
+        complexity: ['error', 20]
       }
     }
-  ],
-  ignorePatterns: ['**/build/*']
+  ]
 };

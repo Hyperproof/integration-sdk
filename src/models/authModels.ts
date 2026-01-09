@@ -1,6 +1,8 @@
 import { CredentialFieldType } from './credentials';
 import { AuthorizationType } from './enums';
-import { ISelectOption, IValidation } from './hyperproofApiModels';
+import { ISelectOption } from './hyperproofApiModels';
+
+import { IValidation } from '@hyperproof-int/hypersync-models';
 
 /**
  * Metadata for a field that is used to provide credentials in a custom

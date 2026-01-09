@@ -1,6 +1,7 @@
 /* eslint-disable max-lines-per-function */
 import * as express from 'express';
 import { debug, IntegrationContext } from './add-on-sdk';
+import { createFetchOptions } from './agent';
 import { asyncLocalStorage, IAsyncStore } from './asyncStore';
 import {
   getHyperproofAccessToken,
@@ -15,13 +16,16 @@ import {
 import {
   AuthorizationType,
   CustomAuthCredentials,
+  HealthStatus,
   HttpHeader,
   IAuthorizationConfigBase,
   ICheckConnectionHealthInvocationPayload,
   IConnectionHealth,
   ITestExternalPermissionsBody,
   ITestExternalPermissionsResponse,
-  LogContextKey
+  IValidateCredentialsResponse,
+  LogContextKey,
+  MimeType
 } from './models';
 import {
   OAuthConnector,
@@ -35,6 +39,7 @@ import createHttpError, { HttpError } from 'http-errors';
 import { StatusCodes } from 'http-status-codes';
 import path from 'path';
 import { ParsedQs } from 'qs';
+import queryString from 'query-string';
 
 /**
  * Representation of a user's connection to an external service.
@@ -121,6 +126,45 @@ export const errorHandler = async (
       message: 'Unknown error occurred. Please try again later.'
     });
   }
+};
+
+export const getIntegrationsSystemAccessToken = async () => {
+  // get accessToken from Hyperproof Public API using Integrations System API
+  const clientId = process.env.integrations_system_api_client_id;
+  const clientSecret = process.env.integrations_system_api_client_secret;
+
+  const url = process.env.hyperproof_oauth_token_url;
+
+  const body = {
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret
+  };
+
+  if (!url) {
+    throw new Error(
+      `Unable to get access token: no hyperproof_oauth_token_url is set.`
+    );
+  }
+  const response = await fetch(
+    url,
+    createFetchOptions(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `${MimeType.FORM_URL_ENCODED};charset=UTF-8`
+      },
+      body: queryString.stringify(body)
+    })
+  );
+  if (!response.ok) {
+    await Logger.error(
+      `Failed to get access token from Hyperproof Public API: ${await response.text()}`
+    );
+    throw new Error(`Failed to get access token from Hyperproof Public API`);
+  }
+  const obj = await response.json();
+
+  return obj.access_token;
 };
 
 /**
@@ -312,9 +356,13 @@ export function createConnector(superclass: typeof OAuthConnector) {
       );
 
       /**
-       * Check a connection's health by vendorUserId
+       * Checks the health of connection for a given vendorUserId.
+       * This called by Hyperproof to verify that the connection is still valid and
+       * that the user can still access the service.  Returns an IConnectionHealth object
+       * indicating the health status of a connection to include message, details,
+       * and resulting external service HTTP status code.
        */
-      app.post(
+      app.put(
         [
           '/organizations/:orgId/users/:userId/connections/:vendorUserId/connectionhealth'
         ],
@@ -461,7 +509,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
               });
               return;
             }
-            this.serveStaticFile(req.query.fileName as string, res);
+            await this.serveStaticFile(req.query.fileName as string, res);
           } catch (err: any) {
             next(err);
           }
@@ -558,7 +606,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
      * @param {string} vendorUserId The vendor user id
      * @param {string} vendorId If specified, vendorUserId represents the identity of the user in another system.
      */
-    async getHyperproofUserContext(
+    async getHyperproofUserContext<TUserProfile extends object = object>(
       integrationContext: IntegrationContext,
       vendorUserId: string,
       vendorId?: string
@@ -567,7 +615,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
         integrationContext,
         vendorUserId,
         vendorId
-      )) as IHyperproofUserContext;
+      )) as IHyperproofUserContext<TUserProfile>;
     }
 
     /**
@@ -650,7 +698,43 @@ export function createConnector(superclass: typeof OAuthConnector) {
       await integrationContext.storage.delete(location);
     }
 
-    /* eslint-disable @typescript-eslint/no-unused-vars */
+    /**
+     * Validates custom auth credentials that are provided when creating a new
+     * new user connection.  Designed to be overridden.
+     *
+     * @returns An object containing values to be persisted in UserContext.
+     */
+    async validateCredentials(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      credentials: CustomAuthCredentials,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      integrationContext: IntegrationContext,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      hyperproofUserId: string,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      externalUserId: string
+    ): Promise<IValidateCredentialsResponse> {
+      throw createHttpError(StatusCodes.NOT_IMPLEMENTED, 'Not Implemented');
+    }
+
+    /**
+     * Validate access token of the OAuth connector. This must be implemented by the connector.
+     *
+     * The connector's implementation should not handle any error so that it can be handled in checkConnectionHealth
+     */
+    async validateAccessToken(
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      integrationContext: IntegrationContext,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      userContext: UserContext,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      accessToken: string,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      body?: ICheckConnectionHealthInvocationPayload
+    ): Promise<void> {
+      throw createHttpError(StatusCodes.NOT_IMPLEMENTED, 'Not Implemented');
+    }
+
     async checkConnectionHealth(
       integrationContext: IntegrationContext,
       orgId: string,
@@ -658,9 +742,128 @@ export function createConnector(superclass: typeof OAuthConnector) {
       vendorUserId: string,
       body?: ICheckConnectionHealthInvocationPayload
     ): Promise<IConnectionHealth> {
-      throw new Error('Must be implemented by the derived class.');
+      try {
+        const userContext = await this.getHyperproofUserContext(
+          integrationContext,
+          vendorUserId
+        );
+
+        // we'll need to allow JiraHS to find its userContext using hostUrl
+        if (!userContext) {
+          throw createHttpError(
+            StatusCodes.NOT_FOUND,
+            this.getUserNotFoundMessage(vendorUserId)
+          );
+        }
+
+        if (this.authorizationType === AuthorizationType.CUSTOM) {
+          // NOTE: calling this will not save any token retrieved from the corresponding service to the vendor-user.
+          // In the case of AWS, the temporary token for cross-account role auth is saved in vendor-user for each sync, but not saved by validateCredentials itself.
+          // Since the token is temporary they will expire in an hour and way before AWS scheduled syncs are run and thus no reason to save it in this step.
+          await this.validateCredentials(
+            userContext.keys!,
+            integrationContext,
+            userId,
+            vendorUserId
+          );
+        } else {
+          const tokenResponse = await this.ensureAccessToken(
+            integrationContext,
+            userContext
+          );
+
+          await this.validateAccessToken(
+            integrationContext,
+            userContext,
+            tokenResponse.access_token,
+            body
+          );
+        }
+      } catch (e: any) {
+        // The connector can customize the health result status and message here.
+        // However custom connectors' validateCredentials may have already handled the
+        // error and threw a different error/status code.
+        const healthResult = this.handleHealthError(e);
+
+        if (healthResult.healthStatus === HealthStatus.NotImplemented) {
+          await Logger.info(
+            `Connection health check found the connector did not implement validate credentials function.`
+          );
+        } else if (healthResult.healthStatus === HealthStatus.Unhealthy) {
+          if (healthResult.statusCode === StatusCodes.NOT_FOUND) {
+            await Logger.info(
+              `Connection health check returned an unhealthy response: ${this.getUserNotFoundMessage(
+                vendorUserId
+              )}`
+            );
+          } else {
+            await Logger.info(
+              `Connection health check returned an unhealthy response: ${healthResult.message}`
+            );
+          }
+        } else if (healthResult.healthStatus === HealthStatus.Unknown) {
+          await Logger.warn(
+            `Connection health check returned an unknown error: ${healthResult.message}`
+          );
+        }
+
+        return healthResult;
+      }
+
+      return {
+        healthStatus: HealthStatus.Healthy,
+        message: undefined,
+        details: undefined,
+        statusCode: StatusCodes.OK
+      };
     }
-    /* eslint-enable @typescript-eslint/no-unused-vars */
+
+    getUserNotFoundMessage(vendorUserId: string) {
+      return `No ${this.connectorName} account found with id ${vendorUserId}. The connection may have been deleted.`;
+    }
+
+    handleHealthError(error: any): IConnectionHealth {
+      const errorMessage = error.message;
+      const extendedErrorMessage = error[LogContextKey.ExtendedMessage];
+      const healthResult: Readonly<IConnectionHealth> = {
+        healthStatus: HealthStatus.Unknown,
+        message: `Error: ${
+          extendedErrorMessage ? extendedErrorMessage : errorMessage
+        }`,
+        details: undefined,
+        statusCode: error.statusCode || StatusCodes.INTERNAL_SERVER_ERROR
+      };
+      const statusCode = error.statusCode ?? error.status;
+      switch (statusCode) {
+        case StatusCodes.NOT_FOUND:
+          return {
+            ...healthResult,
+            healthStatus: HealthStatus.Unhealthy,
+            message: `Hyperproof cannot connect to ${this.connectorName}, your credentials may have expired. Try Update Credentials in Hyperproof and if that doesn't fix the connection, contact your system admin.`
+          };
+        case StatusCodes.UNAUTHORIZED:
+        case StatusCodes.FORBIDDEN:
+          return {
+            ...healthResult,
+            healthStatus: HealthStatus.Unhealthy,
+            message: extendedErrorMessage ? extendedErrorMessage : errorMessage
+          };
+        case StatusCodes.NOT_IMPLEMENTED:
+          return {
+            ...healthResult,
+            healthStatus: HealthStatus.NotImplemented,
+            message: 'The function for validating token is not implemented.'
+          };
+        case StatusCodes.SERVICE_UNAVAILABLE:
+          return {
+            ...healthResult,
+            healthStatus: HealthStatus.Unhealthy,
+            message: extendedErrorMessage ? extendedErrorMessage : errorMessage
+          };
+      }
+
+      return healthResult;
+    }
 
     /**
      * Awaitable sleep function.

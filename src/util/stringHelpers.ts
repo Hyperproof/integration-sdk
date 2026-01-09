@@ -45,3 +45,9 @@ export const removeSurrounding = (str: string, char: string) => {
 export const removeSurroundingQuotes = (str: string) => {
   return removeSurrounding(str, '"');
 };
+
+export const formatString = (str: string, ...values: any) => {
+  return str.replace(/{(\d+)}/g, function (match, index) {
+    return typeof values[index] !== 'undefined' ? values[index] : match;
+  });
+};
