@@ -11,12 +11,14 @@
   "types": "lib/index.d.ts",
   "scripts": {
     "build": "tsc && copyfiles -u 1 \"src/**/*.d.ts\" lib",
-    "lint": "./node_modules/eslint/bin/eslint.js src/**/*.ts"
+    "lint": "eslint 'src/**/*.{js,ts}' --max-warnings 0",
+    "test": "jest --config=../../packages/jest-config/lib/jest.config.js"
   },
   "engines": {
     "node": "22"
   },
   "dependencies": {
+    "@hyperproof-int/hypersync-models": "6.0.0",
     "@js-joda/core": "3.2.0",
     "@pollyjs/adapter-node-http": "6.0.6",
     "@pollyjs/core": "6.0.6",
