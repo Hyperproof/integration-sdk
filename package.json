@@ -15,7 +15,7 @@
     "test": "jest --config=../../packages/jest-config/lib/jest.config.js"
   },
   "engines": {
-    "node": "22"
+    "node": "^22.0.0"
   },
   "dependencies": {
     "@hyperproof-int/hypersync-models": "6.0.0",
