@@ -4,8 +4,9 @@ SDK for building integrations in Hyperproof.
 
 ## Release Notes
 
-### 2.0.0
+### 6.0.0
 
+- Bumped version to 6 to match hypersync-models package. All packages versions will be kept in sync from now on.
 - **Breaking:** Updated to Node.js 22
 - **Breaking:** Removed `ErrorName` enum and `RefreshTokenError` class
 - Added `CredentialFieldType` enum (moved from `@hyperproof/hypersync-models`)
