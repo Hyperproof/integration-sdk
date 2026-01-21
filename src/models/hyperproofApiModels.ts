@@ -155,7 +155,7 @@ export interface ITask extends IOrgObject {
   orgId: string;
   title: string;
   description?: string;
-  assigneeId: string;
+  assigneeId?: string;
   targetId: string;
   targetType: string;
   targetObjectStatus: ObjectStatus;
@@ -209,6 +209,7 @@ export interface ITaskPatch {
 
 // Updates from the Hyperproof Task that should be applied to the external ticket
 export interface ITicketPatch {
+  clearAssigneeId?: boolean;
   clearDueDate?: boolean;
   comments?: IActivity[];
   description?: string;
