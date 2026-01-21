@@ -1,4 +1,7 @@
+import * as uuid from 'uuid';
 import { OAuthConnector, UserContext } from './OAuthConnector';
+
+import { StatusCodes } from 'http-status-codes';
 
 import {
   completeWithSuccess,
@@ -10,8 +13,14 @@ import {
   serializeState
 } from '../add-on-sdk';
 
-const createHttpException = (message: string, state: any) => ({
-  status: 500,
+const SAVED_STATE_COOKIE = 'savedstate';
+
+const createHttpException = (
+  status: StatusCodes,
+  message: string,
+  state: any
+) => ({
+  status,
   message,
   state
 });
@@ -65,6 +74,7 @@ const configure = (connector: OAuthConnector) => {
       debug('ERROR POST-PROCESSING USER CONTEXT', e);
       await connector.deleteUser(ctx, vendorUserId);
       throw createHttpException(
+        StatusCodes.INTERNAL_SERVER_ERROR,
         `Error initializing new user: ${e.message}`,
         state
       );
@@ -85,11 +95,13 @@ const configure = (connector: OAuthConnector) => {
     debug('AUTH INIT', state, data);
 
     state.configurationState = 'authCallback';
+    data.stateParam = uuid.v4().replace(/-/g, '');
     state.data = data;
+    const serializedState = serializeState(state);
 
     const authorizationUrl = await connector.getAuthorizationUrl(
       ctx,
-      serializeState(state),
+      serializedState,
       `${ctx.baseUrl}/callback`
     );
 
@@ -107,7 +119,10 @@ const configure = (connector: OAuthConnector) => {
         }
       : {
           status: 302,
-          headers: { location: authorizationUrl }
+          headers: {
+            location: authorizationUrl,
+            ['set-cookie']: `${SAVED_STATE_COOKIE}=${serializedState}; Secure; HttpOnly`
+          }
         };
   };
 
@@ -116,6 +131,32 @@ const configure = (connector: OAuthConnector) => {
     state: FunctionState
   ) => {
     // Process OAuth callback
+
+    let savedState;
+    const cookieHeader = ctx.headers?.cookie;
+    if (cookieHeader) {
+      cookieHeader.split(';').forEach(cookie => {
+        // Can't use split--value may have = chars.
+        const index = cookie.indexOf('=');
+        if (index > 0) {
+          if (
+            cookie.substring(0, index).trim().toLowerCase() ===
+            SAVED_STATE_COOKIE
+          ) {
+            savedState = cookie.substring(index + 1).trim();
+          }
+        }
+      });
+    }
+
+    if (serializeState(state) !== savedState) {
+      debug('CALLBACK STATE DOES NOT MATCH SAVED STATE');
+      throw createHttpException(
+        StatusCodes.UNAUTHORIZED,
+        'Error processing authorization code response.',
+        state
+      );
+    }
 
     let vendorUserId = '';
     let userPersisted = false;
@@ -149,6 +190,7 @@ const configure = (connector: OAuthConnector) => {
           await connector.deleteUser(ctx, vendorUserId);
         }
         throw createHttpException(
+          StatusCodes.INTERNAL_SERVER_ERROR,
           `Error exchanging the authorization code for an access token: ${e.message}`,
           state
         );
@@ -161,6 +203,7 @@ const configure = (connector: OAuthConnector) => {
       return settingsManagers(ctx, state, data);
     } else {
       throw createHttpException(
+        StatusCodes.INTERNAL_SERVER_ERROR,
         `Authentication failed: ${
           ctx.query?.error_description || ctx.query?.error || 'Unknown error'
         }`,

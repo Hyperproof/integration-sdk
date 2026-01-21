@@ -5,6 +5,7 @@ import { StatusCodes } from 'http-status-codes';
 import Superagent from 'superagent';
 
 import { IntegrationContext } from '../add-on-sdk';
+import { getAgent } from '../agent';
 import {
   AuthorizationType,
   IAuthorizationConfig,
@@ -149,9 +150,9 @@ export const getHyperproofAccessToken = async (
     'Exchanging Hyperproof authorization code for an access token.'
   );
   try {
-    const response = await Superagent.post(
-      process.env.hyperproof_oauth_token_url!
-    )
+    const url = process.env.hyperproof_oauth_token_url!;
+    const response = await Superagent.post(url)
+      .agent(getAgent(url))
       .type('form')
       .set({ ...TraceParent.getHeaders() })
       .send({
@@ -200,9 +201,9 @@ const refreshHyperproofAccessToken = async (
     `Refreshing Hyperproof API client using URL ${process.env.hyperproof_oauth_token_url}`
   );
   const currentRefreshToken = hpUserContext.hyperproofToken.refresh_token;
-  const response = await Superagent.post(
-    process.env.hyperproof_oauth_token_url!
-  )
+  const url = process.env.hyperproof_oauth_token_url!;
+  const response = await Superagent.post(url)
+    .agent(getAgent(url))
     .type('form')
     .set({ ...TraceParent.getHeaders() })
     .send({
@@ -252,7 +253,7 @@ export const ensureHyperproofAccessToken = async (
       hyperproofToken.expires_at > Date.now() + ACCESS_TOKEN_EXPIRATION_BUFFER)
   ) {
     await Logger.info(
-      `Returning current Hyperpoof access token for user ${userKey}`
+      `Returning current Hyperproof access token for user ${userKey}`
     );
     return hyperproofToken.access_token;
   }
@@ -482,9 +483,9 @@ export const deleteHyperproofUser = async (
       userId,
       instanceType
     );
-    await Superagent.delete(
-      `${process.env.hyperproof_oauth_token_url}/organizations/${orgId}`
-    )
+    const url = `${process.env.hyperproof_oauth_token_url}/organizations/${orgId}`;
+    await Superagent.delete(url)
+      .agent(getAgent(url))
       .send({ client_secret: hyperproofClientSecret })
       .set({
         ...TraceParent.getHeaders(),

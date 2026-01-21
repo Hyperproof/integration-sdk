@@ -16,6 +16,7 @@ import Mock from 'mock-http';
 import Superagent from 'superagent';
 import Url from 'url';
 
+import { getAgent } from '../agent';
 import { LogContextKey } from '../models';
 
 let logger: (message?: any, ...optionalParams: any[]) => void = console.log;
@@ -277,6 +278,7 @@ export const createFunction = async (
     // Create the function
     const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}`;
     let response = await Superagent.put(url)
+      .agent(getAgent(url))
       .set('Authorization', accessTokenHeader)
       .send(functionSpecification);
     functionCreated = true;
@@ -284,9 +286,10 @@ export const createFunction = async (
     // Wait for the function to be built and ready
     let attempts = 15;
     while (response.status === 201 && attempts > 0) {
-      response = await Superagent.get(
-        `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}/build/${response.body.buildId}`
-      ).set('Authorization', accessTokenHeader);
+      const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}/build/${response.body.buildId}`;
+      response = await Superagent.get(url)
+        .agent(getAgent(url))
+        .set('Authorization', accessTokenHeader);
       if (response.status === 200) {
         if (response.body.status === 'success') {
           break;
@@ -313,9 +316,10 @@ export const createFunction = async (
       if (response.body && response.body.location) {
         return response.body.location;
       } else {
-        response = await Superagent.get(
-          `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}/location`
-        ).set('Authorization', accessTokenHeader);
+        const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}/location`;
+        response = await Superagent.get(url)
+          .agent(getAgent(url))
+          .set('Authorization', accessTokenHeader);
         if (response.body && response.body.location) {
           return response.body.location;
         }
@@ -341,13 +345,13 @@ export const deleteFunction = async (
   boundaryId?: string,
   functionId?: string
 ) => {
-  await Superagent.delete(
-    `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${
-      ctx.body.subscriptionId
-    }/boundary/${boundaryId || ctx.body.boundaryId}/function/${
-      functionId || ctx.body.functionId
-    }`
-  )
+  const url = `${ctx.body.baseUrl}/v1/account/${
+    ctx.body.accountId
+  }/subscription/${ctx.body.subscriptionId}/boundary/${
+    boundaryId || ctx.body.boundaryId
+  }/function/${functionId || ctx.body.functionId}`;
+  await Superagent.delete(url)
+    .agent(getAgent(url))
     .set('Authorization', `Bearer ${accessToken}`)
     .ok(res => res.status === 204 || res.status === 404);
 };
@@ -358,13 +362,14 @@ export const getFunctionDefinition = async (
   boundaryId: string,
   functionId: string
 ) => {
-  const response = await Superagent.get(
-    `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${
-      ctx.body.subscriptionId
-    }/boundary/${boundaryId || ctx.body.boundaryId}/function/${
-      functionId || ctx.body.functionId
-    }`
-  ).set('Authorization', `Bearer ${accessToken}`);
+  const url = `${ctx.body.baseUrl}/v1/account/${
+    ctx.body.accountId
+  }/subscription/${ctx.body.subscriptionId}/boundary/${
+    boundaryId || ctx.body.boundaryId
+  }/function/${functionId || ctx.body.functionId}`;
+  const response = await Superagent.get(url)
+    .agent(getAgent(url))
+    .set('Authorization', `Bearer ${accessToken}`);
 
   return response.body;
 };
@@ -403,7 +408,9 @@ export const createStorageClient = async (
       if (!storageSubId && !storageIdPrefix) {
         return undefined;
       }
-      const response = await Superagent.get(getUrl(storageSubId))
+      const url = getUrl(storageSubId);
+      const response = await Superagent.get(url)
+        .agent(getAgent(url))
         .set('Authorization', `Bearer ${accessToken}`)
         .ok(res => res.status < 300 || res.status === 404);
       return response.status === 404 ? undefined : response.body;
@@ -417,7 +424,9 @@ export const createStorageClient = async (
           'Storage objects cannot be stored at the root of the hierarchy. Specify a storageSubId when calling the `put` method, or a storageIdPrefix when creating the storage client.'
         );
       }
-      const response = await Superagent.put(getUrl(storageSubId))
+      const url = getUrl(storageSubId);
+      const response = await Superagent.put(url)
+        .agent(getAgent(url))
         .set('Authorization', `Bearer ${accessToken}`)
         .send(data);
       return response.body;
@@ -435,7 +444,9 @@ export const createStorageClient = async (
           'You are attempting to recursively delete all storage objects in the Fusebit subscription. If this is your intent, please pass "true" as the third parameter in the call to delete(storageSubId, recursive, forceRecursive).'
         );
       }
-      await Superagent.delete(`${getUrl(storageSubId)}${recursive ? '/*' : ''}`)
+      const url = `${getUrl(storageSubId)}${recursive ? '/*' : ''}`;
+      await Superagent.delete(url)
+        .agent(getAgent(url))
         .set('Authorization', `Bearer ${accessToken}`)
         .ok(res => res.status === 404 || res.status === 204);
       return;
@@ -448,7 +459,9 @@ export const createStorageClient = async (
         count: count === undefined || isNaN(count) ? undefined : count,
         next: typeof next === 'string' ? next : undefined
       };
-      const response = await Superagent.get(`${getUrl(storageSubId)}/*`)
+      const url = `${getUrl(storageSubId)}/*`;
+      const response = await Superagent.get(url)
+        .agent(getAgent(url))
         .query(params)
         .set('Authorization', `Bearer ${accessToken}`);
       return response.body;
@@ -552,7 +565,9 @@ export const createFusebitFunctionFromExpress = (
  * to handle incoming request to the /invoke endpoint.  Invoke requests are
  * forwarded to the Express app created and configured by the integration.
  */
-export const createHttpServerApp = (integrationApp: express.Express) => {
+export const createHttpServerApp = (
+  integrationApp: express.Express
+): express.Express => {
   const app = express();
   app.use(bodyParser.json());
 

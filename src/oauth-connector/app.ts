@@ -14,7 +14,7 @@ const httpError = (res: express.Response, status: number, message: string) => {
   });
 };
 
-export const createApp = (connector: OAuthConnector) => {
+export const createApp = (connector: OAuthConnector): express.Express => {
   const app = express();
   const settingsManager = createSettingsManager(createConfigure(connector));
 
