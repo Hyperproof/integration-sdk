@@ -4,7 +4,9 @@ import { StatusCodes } from 'http-status-codes';
 import Superagent from 'superagent';
 
 import { IntegrationContext } from '../add-on-sdk';
-import { getAgent } from '../agent';
+// getAgent (guarded) for the tenant/vendor OAuth token endpoint; getInternalAgent (unguarded) for the trusted
+// Hyperproof/Fusebit platform token endpoint (connectorBaseUrl).
+import { getAgent, getInternalAgent } from '../agent';
 import { Logger } from '../hyperproof-api';
 import { LogContextKey } from '../models';
 
@@ -37,6 +39,7 @@ export interface UserContext<TVendorUserProfile = { [key: string]: any }> {
   lastRefreshStarted?: number;
   lastRefreshError?: any;
   refreshErrorCount?: number;
+  variant?: string;
 }
 
 export interface VendorToken {
@@ -128,19 +131,9 @@ export class OAuthConnector {
    *
    * @param {object} param Object with action and resourceFactory properties
    */
-  authorize({
-    action,
-    resourceFactory
-  }: {
-    action: string;
-    resourceFactory: (req: express.Request) => string;
-  }) {
+  authorize({ action, resourceFactory }: { action: string; resourceFactory: (req: express.Request) => string }) {
     const actionTokens = action.split(':');
-    return async (
-      req: express.Request,
-      res: express.Response,
-      next: express.NextFunction
-    ) => {
+    return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
       const resource = resourceFactory(req);
       try {
         if (!req.fusebit.caller.permissions) {
@@ -164,17 +157,51 @@ export class OAuthConnector {
         }
         throw new Error('Caller does not have sufficient permissions.');
       } catch (e: any) {
-        await Logger.debug(
+        Logger.debug(
           `FAILED AUTHORIZATION CHECK, message: ${e.message}, 
           action: ${action}, resource: ${resource}, 
           permissions: ${req.fusebit.caller.permissions}`
         );
-        res
-          .status(403)
-          .send({ status: 403, statusCode: 403, message: 'Unauthorized' });
+        res.status(403).send({ status: 403, statusCode: 403, message: 'Unauthorized' });
         return;
       }
     };
+  }
+
+  /**
+   * Resolves the variant to use for a request. Base implementation is an identity passthrough;
+   * connectors that support variants (e.g. commercial/gov) override this to supply a default
+   * when variant is undefined (for backward compatibility with pre-existing connections) and/or
+   * to validate the value.
+   * @param {string} variant The variant identifier supplied by the caller, if any.
+   */
+  resolveVariant(variant?: string): string | undefined {
+    return variant;
+  }
+
+  /**
+   * Creates a shallow clone of the integration context with configuration values overlaid by
+   * variant-specific keys (${variantId}_${key}) already present in ctx.configuration. For each key
+   * prefixed with the resolved variant's id, the un-prefixed key is set to that value (e.g.
+   * "gov_oauth_client_id" overlays "oauth_client_id" when the resolved variant is "gov"). Keys
+   * prefixed with other variants are left as-is — nothing reads them directly, so there's nothing
+   * to clean up.
+   * Returns the original context unchanged if no variant is resolved.
+   * @param {IntegrationContext} ctx The integration context
+   * @param {string} variantId The variant identifier (e.g., 'gov', 'commercial')
+   */
+  withVariantConfig(ctx: IntegrationContext, variantId?: string): IntegrationContext {
+    const resolvedVariant = this.resolveVariant(variantId);
+    if (!resolvedVariant) return ctx;
+    const prefix = `${resolvedVariant}_`;
+    const overlay: Record<string, string> = {};
+    for (const [key, value] of Object.entries(ctx.configuration)) {
+      if (key.startsWith(prefix)) {
+        overlay[key.slice(prefix.length)] = value;
+      }
+    }
+    if (!Object.keys(overlay).length) return ctx;
+    return { ...ctx, configuration: { ...ctx.configuration, ...overlay } };
   }
 
   /**
@@ -183,24 +210,16 @@ export class OAuthConnector {
    * @param {string} state The value of the OAuth state parameter.
    * @param {string} redirectUri The callback URL to redirect to after the authorization flow.
    */
-  async getAuthorizationUrl(
-    integrationContext: IntegrationContext,
-    state: string,
-    redirectUri: string
-  ) {
+  async getAuthorizationUrl(integrationContext: IntegrationContext, state: string, redirectUri: string) {
     return [
       integrationContext.configuration.oauth_authorization_url,
       `?response_type=code`,
-      `&scope=${encodeURIComponent(
-        integrationContext.configuration.oauth_scope
-      )}`,
+      `&scope=${encodeURIComponent(integrationContext.configuration.oauth_scope)}`,
       `&state=${state}`,
       `&client_id=${integrationContext.configuration.oauth_client_id}`,
       `&redirect_uri=${encodeURIComponent(redirectUri)}`,
       integrationContext.configuration.oauth_audience
-        ? `&audience=${encodeURIComponent(
-            integrationContext.configuration.oauth_audience
-          )}`
+        ? `&audience=${encodeURIComponent(integrationContext.configuration.oauth_audience)}`
         : undefined,
       integrationContext.configuration.oauth_extra_params
         ? `&${integrationContext.configuration.oauth_extra_params}`
@@ -214,22 +233,15 @@ export class OAuthConnector {
    * @param {string} authorizationCode The authorization_code supplied to the OAuth callback upon successful authorization flow.
    * @param {string} redirectUri The redirect_uri value Fusebit used to start the authorization flow.
    */
-  async getAccessToken(
-    integrationContext: IntegrationContext,
-    authorizationCode: string,
-    redirectUri: string
-  ) {
+  async getAccessToken(integrationContext: IntegrationContext, authorizationCode: string, redirectUri: string) {
     const url = integrationContext.configuration.oauth_token_url;
-    const response = await Superagent.post(url)
-      .agent(getAgent(url))
-      .type('form')
-      .send({
-        grant_type: 'authorization_code',
-        code: authorizationCode,
-        client_id: integrationContext.configuration.oauth_client_id,
-        client_secret: integrationContext.configuration.oauth_client_secret,
-        redirect_uri: redirectUri
-      });
+    const response = await Superagent.post(url).agent(getAgent(url)).type('form').send({
+      grant_type: 'authorization_code',
+      code: authorizationCode,
+      client_id: integrationContext.configuration.oauth_client_id,
+      client_secret: integrationContext.configuration.oauth_client_secret,
+      redirect_uri: redirectUri
+    });
     return response.body;
   }
 
@@ -361,7 +373,7 @@ export class OAuthConnector {
     integrationContext: IntegrationContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     authorizationUrl: string
-  ) {
+  ): Promise<string | undefined> {
     return undefined;
   }
 
@@ -378,21 +390,17 @@ export class OAuthConnector {
     foreignVendorId?: string
   ): Promise<UserContext | undefined> {
     if (foreignVendorId) {
-      const data = await integrationContext.storage.get(
-        this.getStorageIdForVendorUser(vendorUserId, foreignVendorId)
-      );
+      const data = await integrationContext.storage.get(this.getStorageIdForVendorUser(vendorUserId, foreignVendorId));
       vendorUserId = data && data.data && data.data.vendorUserId;
       if (!vendorUserId) {
-        await Logger.info(
+        Logger.info(
           `Could not find vendorUserId from storage for foreignVendorId: ${foreignVendorId}, vendorUserId: ${vendorUserId}`
         );
         return undefined;
       }
     }
-    await Logger.info(`Getting user from storage: ${vendorUserId}`);
-    const s = await integrationContext.storage.get(
-      this.getStorageIdForVendorUser(vendorUserId)
-    );
+    Logger.info(`Getting user from storage: ${vendorUserId}`);
+    const s = await integrationContext.storage.get(this.getStorageIdForVendorUser(vendorUserId));
     return s ? s.data : undefined;
   }
 
@@ -402,21 +410,13 @@ export class OAuthConnector {
    * @param {*} userContext The user context representing the vendor's user. Contains vendorToken and vendorUserProfile, representing responses
    * from getAccessToken and getUserProfile, respectively.
    */
-  async saveUser(
-    integrationContext: IntegrationContext,
-    userContext: UserContext
-  ) {
-    await Logger.info(
-      `Saving user with status ${userContext.status} to storage.`
-    );
+  async saveUser(integrationContext: IntegrationContext, userContext: UserContext) {
+    Logger.info(`Saving user with status ${userContext.status} to storage.`);
     if (userContext.foreignOAuthIdentities) {
       for (const foreignVendorId in userContext.foreignOAuthIdentities) {
         await integrationContext.storage.put(
           { data: { vendorUserId: userContext.vendorUserId } },
-          this.getStorageIdForVendorUser(
-            userContext.foreignOAuthIdentities[foreignVendorId].userId,
-            foreignVendorId
-          )
+          this.getStorageIdForVendorUser(userContext.foreignOAuthIdentities[foreignVendorId].userId, foreignVendorId)
         );
       }
     }
@@ -433,35 +433,17 @@ export class OAuthConnector {
    * @param {string} vendorId If specified, vendorUserId represents the identity of the user in another system.
    * The vendorId must correspond to an entry in userContext.foreignOAuthIdentities.
    */
-  async deleteUser(
-    integrationContext: IntegrationContext,
-    vendorUserId: string,
-    vendorId?: string
-  ) {
-    await Logger.debug(
-      `(OauthConnector) Deleting user with vendorUserId: ${vendorUserId}, vendorId: ${vendorId}`
-    );
-    const userContext = await this.getUser(
-      integrationContext,
-      vendorUserId,
-      vendorId
-    );
+  async deleteUser(integrationContext: IntegrationContext, vendorUserId: string, vendorId?: string) {
+    Logger.debug(`(OauthConnector) Deleting user with vendorUserId: ${vendorUserId}, vendorId: ${vendorId}`);
+    const userContext = await this.getUser(integrationContext, vendorUserId, vendorId);
     if (userContext && userContext.foreignOAuthIdentities) {
       for (const fvId in userContext.foreignOAuthIdentities) {
         await integrationContext.storage.delete(
-          this.getStorageIdForVendorUser(
-            userContext.foreignOAuthIdentities[fvId].userId,
-            fvId
-          )
+          this.getStorageIdForVendorUser(userContext.foreignOAuthIdentities[fvId].userId, fvId)
         );
       }
     }
-    return (
-      userContext &&
-      integrationContext.storage.delete(
-        this.getStorageIdForVendorUser(userContext.vendorUserId)
-      )
-    );
+    return userContext && integrationContext.storage.delete(this.getStorageIdForVendorUser(userContext.vendorUserId));
   }
 
   /**
@@ -489,33 +471,21 @@ export class OAuthConnector {
    * @param {string} foreignVendorId If specified, gets a valid access token for the OAuth connector identified by the
    * foreignVendorId entry in the userContext.foreignOAuthIdentities rather than a user of this connector.
    */
-  async ensureAccessToken(
-    integrationContext: IntegrationContext,
-    userContext: UserContext,
-    foreignVendorId?: string
-  ) {
-    const expiredRefreshTokenMessage =
-      'Refresh token expired. Please reauthorize the connection.';
+  async ensureAccessToken(integrationContext: IntegrationContext, userContext: UserContext, foreignVendorId?: string) {
+    const expiredRefreshTokenMessage = 'Refresh token expired. Please reauthorize the connection.';
     const ensureForeignAccessToken = async () => {
-      const oauthIdentity = (userContext.foreignOAuthIdentities || {})[
-        foreignVendorId!
-      ];
-      await Logger.debug(
+      const oauthIdentity = (userContext.foreignOAuthIdentities || {})[foreignVendorId!];
+      Logger.debug(
         `OBTAINING ACCESS TOKEN FOR FOREIGN USER,
         foreignVenderId: ${foreignVendorId},
         oauthIdentity: ${oauthIdentity}`
       );
       if (oauthIdentity) {
         try {
-          const url = `${
-            oauthIdentity.connectorBaseUrl
-          }/user/${encodeURIComponent(oauthIdentity.userId)}/token`;
+          const url = `${oauthIdentity.connectorBaseUrl}/user/${encodeURIComponent(oauthIdentity.userId)}/token`;
           const response = await Superagent.get(url)
-            .agent(getAgent(url))
-            .set(
-              'Authorization',
-              `Bearer ${integrationContext.fusebit.functionAccessToken}`
-            );
+            .agent(getInternalAgent(url))
+            .set('Authorization', `Bearer ${integrationContext.fusebit.functionAccessToken}`);
           return response.body;
         } catch (e: any) {
           throw new Error(
@@ -532,34 +502,28 @@ export class OAuthConnector {
     const ensureLocalAccessToken = async () => {
       if (this.isAccessTokenActive(userContext.vendorToken)) {
         // Token is valid
-        await Logger.info(
-          `RETURNING CURRENT ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
-        );
+        Logger.info(`RETURNING CURRENT ACCESS TOKEN FOR USER ${userContext.vendorUserId}`);
         return userContext.vendorToken;
       }
 
       if (userContext.vendorToken?.refresh_token) {
         // Token needs refresh
-        await Logger.info(
-          `REFRESHING ACCESS TOKEN FOR USER ${userContext.vendorUserId}`
-        );
+        Logger.info(`REFRESHING ACCESS TOKEN FOR USER ${userContext.vendorUserId}`);
         userContext.status = 'refreshing';
         userContext.lastRefreshStarted = Date.now();
         try {
           await this.saveUser(integrationContext, userContext);
+          const variantCtx = this.withVariantConfig(integrationContext, userContext.variant);
           userContext.vendorToken = await this.refreshAccessToken(
-            integrationContext,
+            variantCtx,
             userContext.vendorToken,
             `${integrationContext.baseUrl}/callback`
           );
           if (userContext.vendorToken) {
             if (!isNaN(userContext.vendorToken.expires_in)) {
-              userContext.vendorToken.expires_at =
-                Date.now() + +userContext.vendorToken.expires_in * 1000;
+              userContext.vendorToken.expires_at = Date.now() + +userContext.vendorToken.expires_in * 1000;
             }
-            userContext.vendorUserProfile = await this.getUserProfile(
-              userContext.vendorToken
-            );
+            userContext.vendorUserProfile = await this.getUserProfile(userContext.vendorToken);
           }
           userContext.status = 'authenticated';
           userContext.refreshErrorCount = 0;
@@ -569,47 +533,38 @@ export class OAuthConnector {
         } catch (e: any) {
           // Token refresh failed
           const responseText = e.response?.text;
-          if (
-            userContext.refreshErrorCount &&
-            userContext.refreshErrorCount > this.refreshErrorLimit
-          ) {
+          if (userContext.refreshErrorCount && userContext.refreshErrorCount > this.refreshErrorLimit) {
             // At or above maximum refresh attempts
             const msg = `Credential "${userContext.vendorUserId}" may have expired. This can be resolved by reauthorizing the connection. Error: ${e.message}`;
             userContext.status = 'refresh_failed';
             userContext.lastRefreshError = msg;
             await this.saveUser(integrationContext, userContext);
-            await Logger.error(msg, responseText);
+            Logger.error(msg, responseText);
             throw createHttpError(StatusCodes.UNAUTHORIZED, msg, {
               [LogContextKey.ExtendedMessage]: responseText,
-              [LogContextKey.ApiUrl]:
-                integrationContext.configuration?.oauth_token_url
+              [LogContextKey.ApiUrl]: integrationContext.configuration?.oauth_token_url
             });
           } else {
             // Increment refresh failure counter
-            userContext.refreshErrorCount =
-              (userContext.refreshErrorCount || 0) + 1;
+            userContext.refreshErrorCount = (userContext.refreshErrorCount || 0) + 1;
             const msg = `Error refreshing access token, attempt ${userContext.refreshErrorCount}: ${e.message}`;
             userContext.status = 'refresh_error';
             userContext.lastRefreshError = msg;
             await this.saveUser(integrationContext, userContext);
             throw createHttpError(StatusCodes.UNAUTHORIZED, msg, {
               [LogContextKey.ExtendedMessage]: responseText,
-              [LogContextKey.ApiUrl]:
-                integrationContext.configuration?.oauth_token_url
+              [LogContextKey.ApiUrl]: integrationContext.configuration?.oauth_token_url
             });
           }
         }
       }
       const msg = `Access token is expired and cannot be refreshed because the refresh token is not present. Credential: "${userContext.vendorUserId}"`;
-      await Logger.error(msg);
+      Logger.error(msg);
       throw createHttpError(StatusCodes.UNAUTHORIZED, msg);
     };
 
-    const waitForRefreshedAccessToken = async (
-      count: number,
-      backoff: number
-    ) => {
-      await Logger.info(
+    const waitForRefreshedAccessToken = async (count: number, backoff: number) => {
+      Logger.info(
         `Waiting for access token to be refreshed for user: ${userContext.vendorUserId}, 
         ATTEMPTS LEFT: ${count}`
       );
@@ -624,36 +579,23 @@ export class OAuthConnector {
         setTimeout(async () => {
           let newUserContext;
           try {
-            newUserContext = await this.getUser(
-              integrationContext,
-              userContext.vendorUserId
-            );
+            newUserContext = await this.getUser(integrationContext, userContext.vendorUserId);
             if (!newUserContext || newUserContext.status === 'refresh_error') {
-              throw new Error(
-                `Concurrent access token refresh operation failed`
-              );
+              throw new Error(`Concurrent access token refresh operation failed`);
             }
 
             if (newUserContext.status === 'refresh_failed') {
-              throw createHttpError(
-                StatusCodes.UNAUTHORIZED,
-                expiredRefreshTokenMessage
-              );
+              throw createHttpError(StatusCodes.UNAUTHORIZED, expiredRefreshTokenMessage);
             }
           } catch (e: any) {
-            return reject(
-              new Error(`Error waiting for access token refresh: ${e.message}`)
-            );
+            return reject(new Error(`Error waiting for access token refresh: ${e.message}`));
           }
           if (newUserContext.status === 'authenticated') {
             return resolve(newUserContext.vendorToken);
           } else {
             let result;
             try {
-              result = await waitForRefreshedAccessToken(
-                count - 1,
-                Math.floor(backoff * this.refreshBackoffIncrement)
-              );
+              result = await waitForRefreshedAccessToken(count - 1, Math.floor(backoff * this.refreshBackoffIncrement));
             } catch (e) {
               return reject(e);
             }
@@ -665,24 +607,20 @@ export class OAuthConnector {
 
     if (foreignVendorId) {
       // Get access token from foreign OAuth connector specified in userContext.foreignOAuthIdentities
-      await Logger.info(`Ensuring Foreign Access Token.`);
+      Logger.info(`Ensuring Foreign Access Token.`);
       return ensureForeignAccessToken();
     } else {
       if (
         userContext.status === 'refreshing' &&
         userContext.lastRefreshStarted &&
-        userContext.lastRefreshStarted + this.concurrentRefreshLockTimeout >
-          Date.now()
+        userContext.lastRefreshStarted + this.concurrentRefreshLockTimeout > Date.now()
       ) {
         // Wait for the currently ongoing refresh operation to finish
-        await Logger.info(`Waiting for Refreshed Access Token.`);
-        return waitForRefreshedAccessToken(
-          this.refreshWaitCountLimit,
-          this.refreshInitialBackoff
-        );
+        Logger.info(`Waiting for Refreshed Access Token.`);
+        return waitForRefreshedAccessToken(this.refreshWaitCountLimit, this.refreshInitialBackoff);
       } else {
         // Get access token for "this" OAuth connector
-        await Logger.info(`Ensuring Local Access Token.`);
+        Logger.info(`Ensuring Local Access Token.`);
         return ensureLocalAccessToken();
       }
     }
@@ -694,16 +632,13 @@ export class OAuthConnector {
   public isAccessTokenActive(vendorToken?: VendorToken): boolean {
     return (
       vendorToken?.access_token !== undefined &&
-      (vendorToken.expires_at === undefined ||
-        vendorToken.expires_at > Date.now() + this.accessTokenExpirationBuffer)
+      (vendorToken.expires_at === undefined || vendorToken.expires_at > Date.now() + this.accessTokenExpirationBuffer)
     );
   }
 
   getStorageIdForVendorUser(id: string, foreignVendorId?: string) {
     return foreignVendorId
-      ? `foreign-vendor-user/${encodeURIComponent(
-          foreignVendorId
-        )}/${encodeURIComponent(id)}`
+      ? `foreign-vendor-user/${encodeURIComponent(foreignVendorId)}/${encodeURIComponent(id)}`
       : `vendor-user/${encodeURIComponent(id)}`;
   }
 

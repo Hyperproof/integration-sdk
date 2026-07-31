@@ -11,9 +11,7 @@ import { Response } from 'node-fetch';
 jest.mock('./hyperproof-api/Logger');
 
 // Mock only the default export (fetch function)
-const mockFetch = jest.spyOn(nodeFetch, 'default') as jest.MockedFunction<
-  typeof nodeFetch.default
->;
+const mockFetch = jest.spyOn(nodeFetch, 'default') as jest.MockedFunction<typeof nodeFetch.default>;
 
 class TestApiClient extends ApiClient {
   // Expose protected methods for testing
@@ -29,8 +27,8 @@ class TestApiClient extends ApiClient {
     return this.handleNetworkError(err);
   }
 
-  public async testHandleFailedResponse(response: Response, apiUrl: string) {
-    return this.handleFailedResponse(response, apiUrl);
+  public async testHandleFailedResponse(response: Response, apiUrl: string, method: string) {
+    return this.handleFailedResponse(response, apiUrl, method);
   }
 
   public async testBuildApiUrlAndFetch(params: any) {
@@ -51,10 +49,7 @@ describe('ApiClient', () => {
         status: StatusCodes.OK
       });
 
-      const result = await client.testParseResponseBodyJson(
-        response,
-        'http://example.com'
-      );
+      const result = await client.testParseResponseBodyJson(response, 'http://example.com');
       expect(result).toEqual({ key: 'value' });
     });
 
@@ -63,10 +58,7 @@ describe('ApiClient', () => {
         status: StatusCodes.NO_CONTENT
       });
 
-      const result = await client.testParseResponseBodyJson(
-        response,
-        'http://example.com'
-      );
+      const result = await client.testParseResponseBodyJson(response, 'http://example.com');
       expect(result).toBeUndefined();
     });
 
@@ -75,10 +67,7 @@ describe('ApiClient', () => {
         status: StatusCodes.OK
       });
 
-      const result = await client.testParseResponseBodyJson(
-        response,
-        'http://example.com'
-      );
+      const result = await client.testParseResponseBodyJson(response, 'http://example.com');
       expect(result).toBeUndefined();
     });
 
@@ -87,9 +76,7 @@ describe('ApiClient', () => {
         status: StatusCodes.OK
       });
 
-      await expect(
-        client.testParseResponseBodyJson(response, 'http://example.com')
-      ).rejects.toMatchObject({
+      await expect(client.testParseResponseBodyJson(response, 'http://example.com')).rejects.toMatchObject({
         status: StatusCodes.INTERNAL_SERVER_ERROR,
         message: 'Failed to convert response body to JSON'
       });
@@ -143,8 +130,7 @@ describe('ApiClient', () => {
     it('should map ENOTFOUND to BAD_GATEWAY', async () => {
       const error = {
         code: 'ENOTFOUND',
-        message:
-          'request to https://api.example.com failed, getaddrinfo ENOTFOUND'
+        message: 'request to https://api.example.com failed, getaddrinfo ENOTFOUND'
       };
 
       const result = await client.testHandleNetworkError(error);
@@ -158,9 +144,7 @@ describe('ApiClient', () => {
         status: StatusCodes.BAD_REQUEST
       });
 
-      await expect(
-        client.testHandleFailedResponse(response, 'http://example.com/api')
-      ).rejects.toMatchObject({
+      await expect(client.testHandleFailedResponse(response, 'http://example.com/api', 'GET')).rejects.toMatchObject({
         status: StatusCodes.BAD_REQUEST
       });
     });
@@ -183,14 +167,11 @@ describe('ApiClient', () => {
       const networkError = new Error('Network failure');
       mockFetch.mockRejectedValue(networkError);
 
-      const handleNetworkErrorSpy = jest.spyOn(
-        client as any,
-        'handleNetworkError'
-      );
+      const handleNetworkErrorSpy = jest.spyOn(client as any, 'handleNetworkError');
 
       await expect(
         client.testBuildApiUrlAndFetch({
-          url: 'http://example.com/api',
+          url: 'https://example.com/api',
           method: HttpMethod.GET
         })
       ).rejects.toMatchObject({
@@ -206,24 +187,18 @@ describe('ApiClient', () => {
       });
       mockFetch.mockResolvedValue(failedResponse);
 
-      const handleFailedResponseSpy = jest.spyOn(
-        client as any,
-        'handleFailedResponse'
-      );
+      const handleFailedResponseSpy = jest.spyOn(client as any, 'handleFailedResponse');
 
       await expect(
         client.testBuildApiUrlAndFetch({
-          url: 'http://example.com/api',
+          url: 'https://example.com/api',
           method: HttpMethod.GET
         })
       ).rejects.toMatchObject({
         status: StatusCodes.BAD_REQUEST
       });
 
-      expect(handleFailedResponseSpy).toHaveBeenCalledWith(
-        failedResponse,
-        'http://example.com/api'
-      );
+      expect(handleFailedResponseSpy).toHaveBeenCalledWith(failedResponse, 'https://example.com/api', 'GET');
     });
   });
 });

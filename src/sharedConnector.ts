@@ -1,9 +1,12 @@
 /* eslint-disable max-lines-per-function */
 import * as express from 'express';
 import { debug, IntegrationContext } from './add-on-sdk';
-import { createFetchOptions } from './agent';
+// The shared connector's token exchange targets the Hyperproof platform OAuth endpoint (hyperproof_oauth_token_url),
+// a trusted internal host - use the UNGUARDED agent.
+import { createInternalFetchOptions } from './agent';
 import { asyncLocalStorage, IAsyncStore } from './asyncStore';
 import {
+  ensureHyperproofAccessToken,
   getHyperproofAccessToken,
   getHyperproofAuthConfig,
   HYPERPROOF_USER_STORAGE_ID,
@@ -13,11 +16,13 @@ import {
   LoggerContextKey,
   setHyperproofClientSecret
 } from './hyperproof-api';
+import { integrationUp } from './metrics';
 import {
   AuthorizationType,
   CustomAuthCredentials,
   HealthStatus,
   HttpHeader,
+  HyperproofErrorCode,
   IAuthorizationConfigBase,
   ICheckConnectionHealthInvocationPayload,
   IConnectionHealth,
@@ -27,11 +32,7 @@ import {
   LogContextKey,
   MimeType
 } from './models';
-import {
-  OAuthConnector,
-  OAuthTokenResponse,
-  UserContext
-} from './oauth-connector';
+import { OAuthConnector, OAuthTokenResponse, UserContext } from './oauth-connector';
 import { formatUserKey, getHpUserFromUserKey } from './util';
 
 import fs from 'fs';
@@ -68,8 +69,7 @@ export interface IUserConnectionPatch {
  * Model for user data stored in Fusebit by Hyperproof integrations.  We extend
  * Fusebit's built-in user context object with some additional properties.
  */
-export interface IHyperproofUserContext<TUserProfile = object>
-  extends UserContext<TUserProfile> {
+export interface IHyperproofUserContext<TUserProfile = object> extends UserContext<TUserProfile> {
   // Object which tracks the Hyperproof users which are associated with the
   // vendor user.  The user key is generally of the form '/orgs/orgid/users/userid'
   // although variants do exist for certain integrations like Jira.
@@ -103,19 +103,17 @@ export interface IHyperproofUserContext<TUserProfile = object>
  * All 4 parameters are needed so that express knows this is an error handling middleware
  */
 export const errorHandler = async (
-  err: HttpError | Error,
+  err: any,
   req: express.Request,
   res: express.Response,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   next: express.NextFunction
 ) => {
   if (err) {
-    const status =
-      (err as HttpError).status ??
-      (err as HttpError).statusCode ??
-      StatusCodes.INTERNAL_SERVER_ERROR;
+    const status = (err as HttpError).status ?? (err as HttpError).statusCode ?? StatusCodes.INTERNAL_SERVER_ERROR;
     res.status(status).json({
       message: err.message,
+      errorCode: err.errorCode,
       extendedError: {
         ...err,
         [LogContextKey.StackTrace]: err.stack
@@ -142,13 +140,11 @@ export const getIntegrationsSystemAccessToken = async () => {
   };
 
   if (!url) {
-    throw new Error(
-      `Unable to get access token: no hyperproof_oauth_token_url is set.`
-    );
+    throw new Error(`Unable to get access token: no hyperproof_oauth_token_url is set.`);
   }
   const response = await fetch(
     url,
-    createFetchOptions(url, {
+    createInternalFetchOptions(url, {
       method: 'POST',
       headers: {
         'Content-Type': `${MimeType.FORM_URL_ENCODED};charset=UTF-8`
@@ -157,9 +153,7 @@ export const getIntegrationsSystemAccessToken = async () => {
     })
   );
   if (!response.ok) {
-    await Logger.error(
-      `Failed to get access token from Hyperproof Public API: ${await response.text()}`
-    );
+    Logger.error(`Failed to get access token from Hyperproof Public API: ${await response.text()}`);
     throw new Error(`Failed to get access token from Hyperproof Public API`);
   }
   const obj = await response.json();
@@ -181,8 +175,16 @@ export const getIntegrationsSystemAccessToken = async () => {
  */
 export function createConnector(superclass: typeof OAuthConnector) {
   return class Connector extends superclass {
-    public integrationType: string;
+    public _integrationType!: string;
     public connectorName: string;
+
+    public get integrationType(): string {
+      return this._integrationType;
+    }
+
+    public set integrationType(value: string) {
+      this._integrationType = value;
+    }
     public authorizationType: AuthorizationType;
 
     // TODO: Move types into @types/fusebit__oauth-connector (HYP-30165)
@@ -213,15 +215,22 @@ export function createConnector(superclass: typeof OAuthConnector) {
     constructor(connectorName: string) {
       super();
       if (!process.env.integration_type) {
-        throw new Error(
-          'process.env.integration_type not set for this connector'
-        );
+        throw new Error('process.env.integration_type not set for this connector');
       }
       this.integrationType = process.env.integration_type;
       this.connectorName = connectorName;
-      this.authorizationType = process.env.oauth_client_id
-        ? AuthorizationType.OAUTH
-        : AuthorizationType.CUSTOM;
+
+      // Connectors with OAuth variants (e.g. azure-ad) set process.env.variants in their
+      // configuration; plain OAuth connectors set oauth_client_id directly.
+      const isOAuthType = !!process.env.oauth_client_id || !!process.env.variants;
+      if (process.env.merge_api_key && process.env.merge_create_link_token_url) {
+        this.authorizationType = AuthorizationType.MERGE_LINK;
+      } else if (isOAuthType) {
+        this.authorizationType = AuthorizationType.OAUTH;
+      } else {
+        this.authorizationType = AuthorizationType.CUSTOM;
+      }
+
       this.checkAuthorized = this.checkAuthorized.bind(this);
 
       // this must be set in the constructor after super() and not as a default
@@ -249,6 +258,12 @@ export function createConnector(superclass: typeof OAuthConnector) {
     onCreate(app: express.Router) {
       super.onCreate(app);
 
+      // Mark this integration as up. The /metrics endpoint that exposes this
+      // gauge is registered on the outer Express app in addOn.ts:createHttpServerApp,
+      // because routes on this inner Router are only reachable via the Fusebit
+      // /invoke envelope and Prometheus speaks plain HTTP.
+      integrationUp.set({ integration_type: process.env.integration_type ?? 'unknown' }, 1);
+
       /**
        * Sets up the execution context and logs that a request was received.
        *
@@ -265,15 +280,12 @@ export function createConnector(superclass: typeof OAuthConnector) {
         if (subscriptionKey) {
           HyperproofApiClient.setSubscriptionKey(subscriptionKey);
         }
-        Logger.init(
-          subscriptionKey ?? process.env.hyperproof_api_subscription_key
-        );
 
         this.setHyperproofClientSecret(req);
 
         const asyncLocalStore = await this.createAsyncLocalStorageContext(req);
         asyncLocalStorage.run(asyncLocalStore, async () => {
-          await Logger.info(`${req.method} ${req.originalUrl}`);
+          Logger.info(`${req.method} ${req.originalUrl}`);
           next();
         });
       });
@@ -288,22 +300,17 @@ export function createConnector(superclass: typeof OAuthConnector) {
       /**
        * Returns authorization configuration information.
        */
-      app.get(
-        '/authorization/config',
-        async (req: express.Request, res: express.Response) => {
-          const integrationType =
-            (req.query.integrationType as string | undefined) ??
-            this.integrationType;
-          const config = getHyperproofAuthConfig(
-            req.fusebit,
-            integrationType,
-            this.authorizationType,
-            this.outboundOnly(integrationType, req.query)
-          );
-          this.applyAdditionalAuthorizationConfig(config, req.query);
-          res.json(config);
-        }
-      );
+      app.get('/authorization/config', async (req: express.Request, res: express.Response) => {
+        const integrationType = (req.query.integrationType as string | undefined) ?? this.integrationType;
+        const config = getHyperproofAuthConfig(
+          req.fusebit,
+          integrationType,
+          this.authorizationType,
+          this.outboundOnly(integrationType, req.query)
+        );
+        await this.applyAdditionalAuthorizationConfig(config, req.query, req.fusebit);
+        res.json(config);
+      });
 
       /**
        * Sets a Hyperproof authorization code for a user.
@@ -314,16 +321,25 @@ export function createConnector(superclass: typeof OAuthConnector) {
           '/organizations/:orgId/users/:userId/:type/authorization/code'
         ],
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           const integrationContext = req.fusebit;
+
+          if (req.body === undefined || req.body === null) {
+            return next(
+              createHttpError(StatusCodes.BAD_REQUEST, 'A request body is required to set an authorization code.')
+            );
+          }
+
+          const vendorUserIdValue = req.body.vendorUserId;
+          if (vendorUserIdValue === undefined || vendorUserIdValue === null || vendorUserIdValue === '') {
+            return next(
+              createHttpError(StatusCodes.BAD_REQUEST, 'A vendorUserId is required to set an authorization code.')
+            );
+          }
 
           // Some vendors use a purely numeric ID.  Make sure we treat
           // all vendor user IDs as strings.
-          const vendorUserId = req.body.vendorUserId.toString();
+          const vendorUserId = vendorUserIdValue.toString();
 
           // For Slack the type route param is an integration type value.
           // For other connectors the type param is not specified.
@@ -363,27 +379,31 @@ export function createConnector(superclass: typeof OAuthConnector) {
        * and resulting external service HTTP status code.
        */
       app.put(
-        [
-          '/organizations/:orgId/users/:userId/connections/:vendorUserId/connectionhealth'
-        ],
+        ['/organizations/:orgId/users/:userId/connections/:vendorUserId/connectionhealth'],
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { orgId, userId, vendorUserId } = req.params;
 
-            const result = await this.checkConnectionHealth(
-              integrationContext,
-              orgId,
-              userId,
-              vendorUserId,
-              req.body
-            );
+            const result = await this.checkConnectionHealth(integrationContext, orgId, userId, vendorUserId, req.body);
             return res.json(result);
+          } catch (err: any) {
+            next(err);
+          }
+        }
+      );
+
+      app.get(
+        '/organizations/:orgId/users/:userId/hyperprooftokenhealth',
+        this.checkAuthorized(),
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+          try {
+            const integrationContext = req.fusebit;
+            const { orgId, userId } = req.params;
+
+            await this.validateHyperproofToken(integrationContext, orgId, userId);
+            return res.status(StatusCodes.NO_CONTENT).end();
           } catch (err: any) {
             next(err);
           }
@@ -399,22 +419,12 @@ export function createConnector(superclass: typeof OAuthConnector) {
           '/organizations/:orgId/users/:userId/:type/connections/:vendorUserId'
         ],
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { orgId, userId, vendorUserId, type } = req.params;
 
-            const connection = await this.getUserConnection(
-              integrationContext,
-              orgId,
-              userId,
-              vendorUserId,
-              type
-            );
+            const connection = await this.getUserConnection(integrationContext, orgId, userId, vendorUserId, type);
             if (connection) {
               res.json(connection);
             } else {
@@ -434,19 +444,11 @@ export function createConnector(superclass: typeof OAuthConnector) {
       app.delete(
         '/organizations/:orgId/users/:userId/oauthorizations',
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { orgId, userId } = req.params;
-            await this.deleteHyperproofUserOAuthorization(
-              integrationContext,
-              orgId,
-              userId
-            );
+            await this.deleteHyperproofUserOAuthorization(integrationContext, orgId, userId);
             res.status(StatusCodes.NO_CONTENT).end();
           } catch (err: any) {
             next(err);
@@ -460,11 +462,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
       app.delete(
         '/credentials/:externalUserId',
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { externalUserId } = req.params;
@@ -482,12 +480,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
         async (req, res, next: express.NextFunction) => {
           try {
             const { orgId, userId } = req.params;
-            const permissionsResponse = await this.testPermissions(
-              req.fusebit,
-              orgId,
-              userId,
-              req.body
-            );
+            const permissionsResponse = await this.testPermissions(req.fusebit, orgId, userId, req.body);
             res.json(permissionsResponse);
           } catch (err: any) {
             next(err);
@@ -496,25 +489,21 @@ export function createConnector(superclass: typeof OAuthConnector) {
       );
 
       /**
-       * Retrieve this app's definition
+       * Retrieve static metadata files for this app
        */
-      app.get(
-        '/files',
-        this.checkAuthorized(),
-        async (req, res, next: express.NextFunction) => {
-          try {
-            if (!req.query.fileName) {
-              res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
-                message: `Specify a fileName query parameter to retrieve`
-              });
-              return;
-            }
-            await this.serveStaticFile(req.query.fileName as string, res);
-          } catch (err: any) {
-            next(err);
+      app.get('/files', this.checkAuthorized(), async (req, res, next: express.NextFunction) => {
+        try {
+          if (!req.query.fileName) {
+            res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+              message: `Specify a fileName query parameter to retrieve`
+            });
+            return;
           }
+          await this.serveStaticFile(req.query.fileName as string, res);
+        } catch (err: any) {
+          next(err);
         }
-      );
+      });
 
       // Register the error handler
       app.use(errorHandler);
@@ -568,24 +557,21 @@ export function createConnector(superclass: typeof OAuthConnector) {
      * Formats the foreign-vendor-user/hyperproof storage key that points to the vendorUser token credentials. Overriden
      * by jira and slack as their keys are formatted slightly differently
      */
-    getHyperproofUserStorageKey(
-      orgId: string,
-      userId: string,
-      resource?: string,
-      suffix?: string
-    ) {
+    getHyperproofUserStorageKey(orgId: string, userId: string, resource?: string, suffix?: string) {
       return formatUserKey(orgId, userId, suffix);
     }
 
     /**
      * Can be overriden to add more parameters to the authorization config returned by the /config route as AWS does.
      */
-    applyAdditionalAuthorizationConfig(
+    async applyAdditionalAuthorizationConfig(
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       config: IAuthorizationConfigBase,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      meta: ParsedQs
-    ): void {
+      meta: ParsedQs,
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      ctx?: IntegrationContext
+    ): Promise<void> {
       // custom auth apps can override this method to add fields to intake user credentials
     }
 
@@ -611,11 +597,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
       vendorUserId: string,
       vendorId?: string
     ) {
-      return (await this.getUser(
-        integrationContext,
-        vendorUserId,
-        vendorId
-      )) as IHyperproofUserContext<TUserProfile>;
+      return (await this.getUser(integrationContext, vendorUserId, vendorId)) as IHyperproofUserContext<TUserProfile>;
     }
 
     /**
@@ -651,10 +633,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       integrationType?: string
     ): Promise<IUserConnection> {
-      const userContext = await this.getHyperproofUserContext(
-        integrationContext,
-        vendorUserId
-      );
+      const userContext = await this.getHyperproofUserContext(integrationContext, vendorUserId);
       return this.getUserConnectionFromUserContext(userContext, userId);
     }
 
@@ -683,18 +662,9 @@ export function createConnector(superclass: typeof OAuthConnector) {
       };
     }
 
-    async deleteHyperproofUserOAuthorization(
-      integrationContext: IntegrationContext,
-      orgId: string,
-      userId: string
-    ) {
-      const location = `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
-        orgId,
-        userId
-      )}`;
-      await Logger.info(
-        `Deleting Hyperproof user oauthorization at ${location}`
-      );
+    async deleteHyperproofUserOAuthorization(integrationContext: IntegrationContext, orgId: string, userId: string) {
+      const location = `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(orgId, userId)}`;
+      Logger.info(`Deleting Hyperproof user oauthorization at ${location}`);
       await integrationContext.storage.delete(location);
     }
 
@@ -718,9 +688,10 @@ export function createConnector(superclass: typeof OAuthConnector) {
     }
 
     /**
-     * Validate access token of the OAuth connector. This must be implemented by the connector.
+     * Validates the OAuth access token for the connection.
      *
-     * The connector's implementation should not handle any error so that it can be handled in checkConnectionHealth
+     * Connector implementations should make an API call to the external service that validates
+     * a connection is working and valid, beyond the "ensureAccessToken" token refresh.
      */
     async validateAccessToken(
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -732,7 +703,31 @@ export function createConnector(superclass: typeof OAuthConnector) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       body?: ICheckConnectionHealthInvocationPayload
     ): Promise<void> {
-      throw createHttpError(StatusCodes.NOT_IMPLEMENTED, 'Not Implemented');
+      // No-op by default
+    }
+
+    /**
+     * For 2-way connectors, this validates that a particular user has a valid Hyperproof oauth token
+     */
+    async validateHyperproofToken(
+      integrationContext: IntegrationContext,
+      orgId: string,
+      userId: string
+    ): Promise<void> {
+      if (this.outboundOnly(this.integrationType, {})) {
+        return;
+      }
+      try {
+        await ensureHyperproofAccessToken(integrationContext, orgId, userId);
+      } catch (e: any) {
+        // Cast to a specific errorCode so it can be handled by the caller
+        if ((e as HttpError).statusCode === StatusCodes.UNAUTHORIZED) {
+          throw createHttpError(StatusCodes.UNAUTHORIZED, e.message, {
+            errorCode: HyperproofErrorCode.HyperproofOAuthorizationExpired
+          });
+        }
+        throw e;
+      }
     }
 
     async checkConnectionHealth(
@@ -743,41 +738,22 @@ export function createConnector(superclass: typeof OAuthConnector) {
       body?: ICheckConnectionHealthInvocationPayload
     ): Promise<IConnectionHealth> {
       try {
-        const userContext = await this.getHyperproofUserContext(
-          integrationContext,
-          vendorUserId
-        );
+        const userContext = await this.getHyperproofUserContext(integrationContext, vendorUserId);
 
         // we'll need to allow JiraHS to find its userContext using hostUrl
         if (!userContext) {
-          throw createHttpError(
-            StatusCodes.NOT_FOUND,
-            this.getUserNotFoundMessage(vendorUserId)
-          );
+          throw createHttpError(StatusCodes.NOT_FOUND, this.getUserNotFoundMessage(vendorUserId));
         }
 
         if (this.authorizationType === AuthorizationType.CUSTOM) {
           // NOTE: calling this will not save any token retrieved from the corresponding service to the vendor-user.
           // In the case of AWS, the temporary token for cross-account role auth is saved in vendor-user for each sync, but not saved by validateCredentials itself.
           // Since the token is temporary they will expire in an hour and way before AWS scheduled syncs are run and thus no reason to save it in this step.
-          await this.validateCredentials(
-            userContext.keys!,
-            integrationContext,
-            userId,
-            vendorUserId
-          );
+          await this.validateCredentials(userContext.keys!, integrationContext, userId, vendorUserId);
         } else {
-          const tokenResponse = await this.ensureAccessToken(
-            integrationContext,
-            userContext
-          );
+          const tokenResponse = await this.ensureAccessToken(integrationContext, userContext);
 
-          await this.validateAccessToken(
-            integrationContext,
-            userContext,
-            tokenResponse.access_token,
-            body
-          );
+          await this.validateAccessToken(integrationContext, userContext, tokenResponse.access_token, body);
         }
       } catch (e: any) {
         // The connector can customize the health result status and message here.
@@ -785,26 +761,16 @@ export function createConnector(superclass: typeof OAuthConnector) {
         // error and threw a different error/status code.
         const healthResult = this.handleHealthError(e);
 
-        if (healthResult.healthStatus === HealthStatus.NotImplemented) {
-          await Logger.info(
-            `Connection health check found the connector did not implement validate credentials function.`
-          );
-        } else if (healthResult.healthStatus === HealthStatus.Unhealthy) {
+        if (healthResult.healthStatus === HealthStatus.Unhealthy) {
           if (healthResult.statusCode === StatusCodes.NOT_FOUND) {
-            await Logger.info(
-              `Connection health check returned an unhealthy response: ${this.getUserNotFoundMessage(
-                vendorUserId
-              )}`
+            Logger.info(
+              `Connection health check returned an unhealthy response: ${this.getUserNotFoundMessage(vendorUserId)}`
             );
           } else {
-            await Logger.info(
-              `Connection health check returned an unhealthy response: ${healthResult.message}`
-            );
+            Logger.info(`Connection health check returned an unhealthy response: ${healthResult.message}`);
           }
         } else if (healthResult.healthStatus === HealthStatus.Unknown) {
-          await Logger.warn(
-            `Connection health check returned an unknown error: ${healthResult.message}`
-          );
+          Logger.warn(`Connection health check returned an unknown error: ${healthResult.message}`);
         }
 
         return healthResult;
@@ -827,9 +793,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
       const extendedErrorMessage = error[LogContextKey.ExtendedMessage];
       const healthResult: Readonly<IConnectionHealth> = {
         healthStatus: HealthStatus.Unknown,
-        message: `Error: ${
-          extendedErrorMessage ? extendedErrorMessage : errorMessage
-        }`,
+        message: `Error: ${extendedErrorMessage ? extendedErrorMessage : errorMessage}`,
         details: undefined,
         statusCode: error.statusCode || StatusCodes.INTERNAL_SERVER_ERROR
       };
@@ -847,12 +811,6 @@ export function createConnector(superclass: typeof OAuthConnector) {
             ...healthResult,
             healthStatus: HealthStatus.Unhealthy,
             message: extendedErrorMessage ? extendedErrorMessage : errorMessage
-          };
-        case StatusCodes.NOT_IMPLEMENTED:
-          return {
-            ...healthResult,
-            healthStatus: HealthStatus.NotImplemented,
-            message: 'The function for validating token is not implemented.'
           };
         case StatusCodes.SERVICE_UNAVAILABLE:
           return {
@@ -889,7 +847,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
           // If two API requests refresh a token simultaneously, one of them may return a 409
           // We want to retry in that case, since there should be a fresh token available now
           // In the future, we may want to selectively catch only CONFLICT responses for retry
-          await Logger.warn(
+          Logger.warn(
             `Encountered an error refreshing access token. Retrying...`,
             JSON.stringify({
               [LogContextKey.Message]: err.message,
@@ -901,10 +859,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
           // refresh process can take some time.  Also, refetch the userContext as it can change during an async
           // refresh from another job
           return this.sleep(this.accessTokenRetryDelay).then(async () => {
-            const refetchedUserContext = await this.getUser(
-              integrationContext,
-              userContext.vendorUserId
-            );
+            const refetchedUserContext = await this.getUser(integrationContext, userContext.vendorUserId);
             return super.ensureAccessToken(
               integrationContext,
               refetchedUserContext || userContext, // getUser can return undefined, so in that case just use the existing context
@@ -915,8 +870,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
         .catch((err: any) => {
           throw createHttpError(StatusCodes.UNAUTHORIZED, err.message, {
             ...err,
-            [LogContextKey.ApiUrl]:
-              integrationContext?.configuration?.oauth_token_url
+            [LogContextKey.ApiUrl]: integrationContext?.configuration?.oauth_token_url
           });
         });
     }
@@ -933,18 +887,13 @@ export function createConnector(superclass: typeof OAuthConnector) {
       integrationContext: IntegrationContext,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       authorizationUrl: string
-    ) {
+    ): Promise<string | undefined> {
       return undefined;
     }
 
     decodeState(integrationContext: IntegrationContext) {
       if (integrationContext.query?.state)
-        return JSON.parse(
-          Buffer.from(
-            integrationContext.query.state as string,
-            'base64'
-          ).toString()
-        );
+        return JSON.parse(Buffer.from(integrationContext.query.state as string, 'base64').toString());
     }
 
     async testPermissions(
@@ -962,7 +911,9 @@ export function createConnector(superclass: typeof OAuthConnector) {
 
     async serveStaticFile(fileName: string, res: express.Response) {
       try {
+        debug(`[SharedConnector] serveStaticFile called with fileName: ${fileName}`);
         const filePath = this.getAbsolutePath(fileName);
+        debug(`[SharedConnector] Resolved to filePath: ${filePath}`);
         const fileExtension = filePath.slice(filePath.lastIndexOf('.'));
         let rawData: string;
         debug(`Retrieving static file from ${filePath}`);
@@ -970,6 +921,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
           case '.json': {
             rawData = fs.readFileSync(filePath, { encoding: 'utf8' });
             const jsonData = JSON.parse(rawData);
+            debug(jsonData);
             res.json(jsonData);
             break;
           }
@@ -980,9 +932,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
             break;
           }
           default: {
-            res
-              .status(StatusCodes.BAD_REQUEST)
-              .json({ message: `File type ${fileExtension} is not supported` });
+            res.status(StatusCodes.BAD_REQUEST).json({ message: `File type ${fileExtension} is not supported` });
             break;
           }
         }
@@ -994,26 +944,19 @@ export function createConnector(superclass: typeof OAuthConnector) {
 
     getAbsolutePath(fileName: string) {
       const relativePath =
-        process.env.integration_platform === 'azure'
-          ? `./static/${fileName}`
-          : `./app/static/${fileName}`;
+        process.env.integration_platform === 'azure' ? `./static/${fileName}` : `./app/static/${fileName}`;
       const absolutePath = path.resolve(relativePath);
       return absolutePath;
     }
 
     setHyperproofClientSecret(req: express.Request) {
-      const clientSecret = this.getHeader(
-        req,
-        HttpHeader.HyperproofClientSecret
-      );
+      const clientSecret = this.getHeader(req, HttpHeader.HyperproofClientSecret);
       if (clientSecret) {
         setHyperproofClientSecret(clientSecret);
       }
     }
 
-    async createAsyncLocalStorageContext(
-      req: express.Request
-    ): Promise<IAsyncStore> {
+    async createAsyncLocalStorageContext(req: express.Request): Promise<IAsyncStore> {
       const baggage = this.getHeader(req, HttpHeader.Baggage);
       const traceParent = this.getHeader(req, HttpHeader.TraceParent);
 
@@ -1021,7 +964,7 @@ export function createConnector(superclass: typeof OAuthConnector) {
       const loggerContext: LoggerContext = {
         [LoggerContextKey.IntegrationType]: this.integrationType,
         [LoggerContextKey.OrgId]: orgId,
-        [LoggerContextKey.UserId]: userId
+        ...(userId && userId !== '-' ? { [LoggerContextKey.UserId]: userId } : {})
       };
 
       const externalServiceHeaders = await this.getExternalServiceHeaders(req);
@@ -1029,19 +972,14 @@ export function createConnector(superclass: typeof OAuthConnector) {
       return { baggage, traceParent, loggerContext, externalServiceHeaders };
     }
 
-    async getExternalServiceHeaders(
-      req: express.Request
-    ): Promise<{ [key: string]: string } | undefined> {
-      const encodedExternalServiceHeaders = this.getHeader(
-        req,
-        HttpHeader.ExternalServiceHeaders
-      );
+    async getExternalServiceHeaders(req: express.Request): Promise<{ [key: string]: string } | undefined> {
+      const encodedExternalServiceHeaders = this.getHeader(req, HttpHeader.ExternalServiceHeaders);
       try {
         return encodedExternalServiceHeaders
           ? JSON.parse(decodeURIComponent(encodedExternalServiceHeaders))
           : undefined;
       } catch (e: any) {
-        await Logger.error(`Failed to parse external service headers`, e);
+        Logger.error(`Failed to parse external service headers`, e);
       }
     }
 

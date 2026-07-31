@@ -20,20 +20,14 @@ export const createApp = (connector: OAuthConnector): express.Express => {
 
   const createUserSubresource = (req: express.Request, subresource?: string) =>
     req.params.vendorId
-      ? `/account/${req.fusebit.accountId}/subscription/${
-          req.fusebit.subscriptionId
-        }/boundary/${req.fusebit.boundaryId}/function/${
-          req.fusebit.functionId
-        }/foreign-user/${encodeURIComponent(
+      ? `/account/${req.fusebit.accountId}/subscription/${req.fusebit.subscriptionId}/boundary/${
+          req.fusebit.boundaryId
+        }/function/${req.fusebit.functionId}/foreign-user/${encodeURIComponent(
           req.params.vendorId
-        )}/${encodeURIComponent(req.params.vendorUserId)}/${
-          (subresource && subresource + '/') || ''
-        }`
-      : `/account/${req.fusebit.accountId}/subscription/${
-          req.fusebit.subscriptionId
-        }/boundary/${req.fusebit.boundaryId}/function/${
-          req.fusebit.functionId
-        }/user/${encodeURIComponent(req.params.vendorUserId)}/${
+        )}/${encodeURIComponent(req.params.vendorUserId)}/${(subresource && subresource + '/') || ''}`
+      : `/account/${req.fusebit.accountId}/subscription/${req.fusebit.subscriptionId}/boundary/${
+          req.fusebit.boundaryId
+        }/function/${req.fusebit.functionId}/user/${encodeURIComponent(req.params.vendorUserId)}/${
           (subresource && subresource + '/') || ''
         }`;
 
@@ -57,17 +51,9 @@ export const createApp = (connector: OAuthConnector): express.Express => {
     }
   );
 
-  const lookupUser = async (
-    req: express.Request,
-    res: express.Response,
-    next: express.NextFunction
-  ) => {
+  const lookupUser = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     // req.params.vendorId may be undefined
-    req.userContext = await connector.getUser(
-      req.fusebit,
-      req.params.vendorUserId,
-      req.params.vendorId
-    );
+    req.userContext = await connector.getUser(req.fusebit, req.params.vendorUserId, req.params.vendorId);
     if (!req.params.userContext) {
       return httpError(
         res,
@@ -90,31 +76,16 @@ export const createApp = (connector: OAuthConnector): express.Express => {
 
   // Get health of the user identified with vendor user ID, or with foreign vendor ID and foreign user ID
   app.get(
-    [
-      '/user/:vendorUserId/health',
-      '/foreign-user/:vendorId/:vendorUserId/health'
-    ],
+    ['/user/:vendorUserId/health', '/foreign-user/:vendorId/:vendorUserId/health'],
     authorizeUserOperation('health'),
     lookupUser,
     async (req, res) => {
       let response;
       try {
-        response = (await connector.getHealth(
-          req.fusebit,
-          req.userContext!
-        )) || { status: 200 };
+        response = (await connector.getHealth(req.fusebit, req.userContext!)) || { status: 200 };
       } catch (e: any) {
-        debug(
-          'ERROR OBTAINING USER HEALTH',
-          req.params.vendorId,
-          req.params.vendorUserId,
-          e.stack || e.message || e
-        );
-        return httpError(
-          res,
-          500,
-          `Error obtaining user health information: ${e.message}`
-        );
+        debug('ERROR OBTAINING USER HEALTH', req.params.vendorId, req.params.vendorUserId, e.stack || e.message || e);
+        return httpError(res, 500, `Error obtaining user health information: ${e.message}`);
       }
       res.status(response.status || 200);
       return response.body ? res.json(response.body) : res.end();
@@ -123,30 +94,16 @@ export const createApp = (connector: OAuthConnector): express.Express => {
 
   // Get current access token for the user identified with vendor user ID, or with foreign vendor ID and foreign user ID
   app.get(
-    [
-      '/user/:vendorUserId/token',
-      '/foreign-user/:vendorId/:vendorUserId/token'
-    ],
+    ['/user/:vendorUserId/token', '/foreign-user/:vendorId/:vendorUserId/token'],
     authorizeUserOperation('token'),
     lookupUser,
     async (req, res) => {
       let vendorToken;
       try {
-        vendorToken = await connector.ensureAccessToken(
-          req.fusebit,
-          req.userContext!
-        );
+        vendorToken = await connector.ensureAccessToken(req.fusebit, req.userContext!);
       } catch (e: any) {
-        debug(
-          'ERROR OBTAINING ACCESS TOKEN',
-          req.params.vendorUserId,
-          e.stack || e.message || e
-        );
-        return httpError(
-          res,
-          502,
-          `Unable to obtain access token for user ${req.params.vendorUserId}: ${e.message}`
-        );
+        debug('ERROR OBTAINING ACCESS TOKEN', req.params.vendorUserId, e.stack || e.message || e);
+        return httpError(res, 502, `Unable to obtain access token for user ${req.params.vendorUserId}: ${e.message}`);
       }
       res.json(vendorToken);
     }
@@ -157,11 +114,7 @@ export const createApp = (connector: OAuthConnector): express.Express => {
     ['/user/:vendorUserId', '/foreign-user/:vendorId/:vendorUserId'],
     authorizeUserOperation(),
     async (req, res) => {
-      await connector.deleteUser(
-        req.fusebit,
-        req.params.vendorUserId,
-        req.params.vendorId
-      );
+      await connector.deleteUser(req.fusebit, req.params.vendorUserId, req.params.vendorId);
       res.status(204);
       res.end();
     }

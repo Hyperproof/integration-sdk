@@ -11,7 +11,9 @@ import path from 'path';
 import queryString from 'query-string';
 
 import { debug, IntegrationContext } from '../add-on-sdk';
-import { createFetchOptions } from '../agent';
+// Trusted internal calls to the Hyperproof platform: use the UNGUARDED agent (the platform host is system-configured
+// and resolves internally, so the tenant-SSRF guard must not be applied here).
+import { createInternalFetchOptions } from '../agent';
 import {
   HttpHeader,
   HttpMethod,
@@ -19,7 +21,7 @@ import {
   ICommentBody,
   IExternalConnectionFilterSystem,
   IExternalConnectionPostSystem,
-  IExternalUser,
+  IExternalUserRef,
   IIntegration,
   IIntegrationPostSystem,
   IIntegrationSettingsBase,
@@ -42,18 +44,12 @@ const TXT_EXTENSION = 'txt';
 const LDIF_EXTENSION = 'ldif';
 
 const alternateMessages: { [key: number]: string } = {
-  [StatusCodes.UNAUTHORIZED]:
-    'Your connection may have expired. Please re-authenticate your connection.',
+  [StatusCodes.UNAUTHORIZED]: 'Your connection may have expired. Please re-authenticate your connection.',
   [StatusCodes.FORBIDDEN]: 'You do not have permission to access this object.',
   [StatusCodes.NOT_FOUND]: 'Referenced object is missing.'
 };
 
-const createErrorMessage = (
-  status: number,
-  method: string,
-  url: string,
-  message: string
-) => {
+const createErrorMessage = (status: number, method: string, url: string, message: string) => {
   const displayUrl = new URL(url).pathname;
   try {
     const json = JSON.parse(message);
@@ -65,9 +61,7 @@ const createErrorMessage = (
     // just use the string if it's not valid json
   }
   const longMsg = `Received ${status} response from Hyperproof when attempting to ${method} ${displayUrl}: ${message}`;
-  return alternateMessages[status]
-    ? `${alternateMessages[status]} ${longMsg}`
-    : longMsg;
+  return alternateMessages[status] ? `${alternateMessages[status]} ${longMsg}` : longMsg;
 };
 
 interface IFetchWithRetryArgs {
@@ -75,22 +69,15 @@ interface IFetchWithRetryArgs {
   options?: RequestInit;
   totalAttempts?: number;
   delaySeconds?: number;
-  onErrorResponse?: (
-    response: Response,
-    errorText: string
-  ) => { errorText?: string; shouldThrow?: boolean };
-  onAnyFetchFailure?: (
-    response: Response,
-    errorText: string
-  ) => { errorText?: string; shouldBreak?: boolean };
+  onErrorResponse?: (response: Response, errorText: string) => { errorText?: string; shouldThrow?: boolean };
+  onAnyFetchFailure?: (response: Response, errorText: string) => { errorText?: string; shouldBreak?: boolean };
 }
 
 /**
  * Client interface to the Hyperproof API.
  */
 export class HyperproofApiClient {
-  private static _subscriptionKey?: string =
-    process.env.hyperproof_api_subscription_key;
+  private static _subscriptionKey?: string = process.env.hyperproof_api_subscription_key;
   private accessToken: string;
 
   private constructor(accessToken: string) {
@@ -123,12 +110,10 @@ export class HyperproofApiClient {
 
     do {
       const attemptCounter = `Attempt ${attempt}/${totalAttempts}`;
-      await Logger.info(
-        `HyperproofApiClient: Making ${method} request to ${url}. ${attemptCounter}`
-      );
+      Logger.info(`HyperproofApiClient: Making ${method} request to ${url}. ${attemptCounter}`);
       response = await fetch(
         url,
-        createFetchOptions(url, {
+        createInternalFetchOptions(url, {
           ...options,
           headers: {
             ...options?.headers,
@@ -144,8 +129,7 @@ export class HyperproofApiClient {
 
       let shouldBreak = false;
       if (onAnyFetchFailure) {
-        const { shouldBreak: newShouldBreak, errorText: newErrorText } =
-          onAnyFetchFailure(response, errorText);
+        const { shouldBreak: newShouldBreak, errorText: newErrorText } = onAnyFetchFailure(response, errorText);
         shouldBreak = newShouldBreak ?? false;
         errorText = newErrorText ?? errorText;
       }
@@ -154,31 +138,25 @@ export class HyperproofApiClient {
       }
 
       errorText = await response.text();
-      await Logger.warn(
+      Logger.warn(
         `HyperproofApiClient: Failed to make ${method} request to ${url}. Status code ${response.status}: ${errorText}. ${attemptCounter}`
       );
       await HyperproofApiClient.sleep(delaySeconds);
       attempt++;
     } while (attempt <= totalAttempts);
 
-    await Logger.info(
-      `HyperproofApiClient: Received ${response.status} response from ${method} ${url}`
-    );
+    Logger.info(`HyperproofApiClient: Received ${response.status} response from ${method} ${url}`);
 
     if (!response.ok) {
       const status = response.status ?? StatusCodes.INTERNAL_SERVER_ERROR;
       let shouldThrow = true;
       if (onErrorResponse) {
-        const { shouldThrow: newShouldThrow, errorText: newErrorText } =
-          onErrorResponse(response, errorText);
+        const { shouldThrow: newShouldThrow, errorText: newErrorText } = onErrorResponse(response, errorText);
         shouldThrow = newShouldThrow ?? true;
         errorText = newErrorText ?? errorText;
       }
       if (shouldThrow) {
-        throw createHttpError(
-          status,
-          createErrorMessage(status, method, url, errorText)
-        );
+        throw createHttpError(status, createErrorMessage(status, method, url, errorText));
       } else {
         return undefined as T;
       }
@@ -202,38 +180,24 @@ export class HyperproofApiClient {
    * Factory method that creates a new HyperproofApiClient instance.
    */
 
-  public static async createInstance(
-    integrationContext: IntegrationContext,
-    orgId: string,
-    userId: string
-  ) {
+  public static async createInstance(integrationContext: IntegrationContext, orgId: string, userId: string) {
     // this is done to trigger the non null check in the getter method
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     HyperproofApiClient.subscriptionKey;
 
-    await Logger.debug(
-      `Creating Hyperproof API client using URL ${process.env.hyperproof_api_url}`
-    );
+    Logger.debug(`Creating Hyperproof API client using URL ${process.env.hyperproof_api_url}`);
 
-    const accessToken = await ensureHyperproofAccessToken(
-      integrationContext,
-      orgId,
-      userId
-    );
+    const accessToken = await ensureHyperproofAccessToken(integrationContext, orgId, userId);
 
     return new HyperproofApiClient(accessToken);
   }
 
-  public static async createInstanceByAccessToken(
-    accessToken: string
-  ): Promise<HyperproofApiClient> {
+  public static async createInstanceByAccessToken(accessToken: string): Promise<HyperproofApiClient> {
     // this is done to trigger the non null check in the getter method
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     HyperproofApiClient.subscriptionKey;
 
-    await Logger.debug(
-      `Creating Hyperproof API client using URL via accessToken ${process.env.hyperproof_api_url}`
-    );
+    Logger.debug(`Creating Hyperproof API client using URL via accessToken ${process.env.hyperproof_api_url}`);
 
     return new HyperproofApiClient(accessToken);
   }
@@ -245,9 +209,7 @@ export class HyperproofApiClient {
     return this.getIntegrationSettings(integrationId);
   }
 
-  public async getIntegrationSettings<
-    TIntegration extends IIntegrationSettingsBase
-  >(
+  public async getIntegrationSettings<TIntegration extends IIntegrationSettingsBase>(
     integrationId: string,
     objectType?: ObjectType,
     objectId?: string,
@@ -263,18 +225,14 @@ export class HyperproofApiClient {
     return this.fetchWithRetry<IIntegration<TIntegration>>({
       url,
       onErrorResponse: (response, errorText) =>
-        response.status === StatusCodes.CONFLICT
-          ? { errorText: 'Operation is already in process' }
-          : { errorText }
+        response.status === StatusCodes.CONFLICT ? { errorText: 'Operation is already in process' } : { errorText }
     });
   }
 
   /**
    * Updates an integration settings instance from Hyperproof.
    */
-  public async updateIntegrationSettings<
-    TIntegrationSettings extends IIntegrationSettingsBase
-  >(
+  public async updateIntegrationSettings<TIntegrationSettings extends IIntegrationSettingsBase>(
     objectType: ObjectType,
     objectId: string,
     integrationId: string,
@@ -431,11 +389,7 @@ export class HyperproofApiClient {
    * @param sourceFileId Unique ID of the proof in the external system
    * @param user External user who performed the unlink.
    */
-  public async archiveTaskProofLink(
-    objectId: string,
-    sourceFileId: string,
-    user: IExternalUser
-  ) {
+  public async archiveTaskProofLink(objectId: string, sourceFileId: string, user: IExternalUserRef) {
     const proofMeta = await this.getTaskProofMeta(objectId, sourceFileId);
     const results = [];
     for (const proof of proofMeta as any) {
@@ -449,10 +403,7 @@ export class HyperproofApiClient {
             [HttpHeader.ContentType]: MimeType.APPLICATION_JSON
           }
         },
-        onErrorResponse: response =>
-          response.status === StatusCodes.NOT_FOUND
-            ? { shouldThrow: false }
-            : {}
+        onErrorResponse: response => (response.status === StatusCodes.NOT_FOUND ? { shouldThrow: false } : {})
       });
 
       results.push(json);
@@ -460,12 +411,7 @@ export class HyperproofApiClient {
     return results;
   }
 
-  public async archiveProofLink({
-    proofId,
-    objectId,
-    objectType,
-    externalUser
-  }: IArchiveProofLinkPost) {
+  public async archiveProofLink({ proofId, objectId, objectType, externalUser }: IArchiveProofLinkPost) {
     const url = `${process.env.hyperproof_api_url}/beta/proof/${proofId}/links/${objectId}/archive?objectType=${objectType}`;
     await this.fetchWithRetry({
       url,
@@ -527,12 +473,7 @@ export class HyperproofApiClient {
    * @param objectId Unique ID of the object
    * @param commentId - If patch is of a specific comment (to add a sourceId after syncing)
    */
-  public async patchComment(
-    commentBody: ICommentBody,
-    objectType: ObjectType,
-    objectId: string,
-    commentId?: string
-  ) {
+  public async patchComment(commentBody: ICommentBody, objectType: ObjectType, objectId: string, commentId?: string) {
     return this.sendCommentRequest(
       commentBody,
       HttpMethod.PATCH,
@@ -561,11 +502,7 @@ export class HyperproofApiClient {
     });
   }
 
-  private async postNewProof(
-    objectType: ObjectType,
-    objectId: string,
-    formData: FormData
-  ): Promise<IProof> {
+  private async postNewProof(objectType: ObjectType, objectId: string, formData: FormData): Promise<IProof> {
     let url = `${process.env.hyperproof_api_url}/v1`;
     if (objectType !== ObjectType.ORGANIZATION) {
       url += `/${objectType}s/${objectId}/proof`;
@@ -603,10 +540,7 @@ export class HyperproofApiClient {
     commentId?: string,
     sourceCommentId?: string
   ) {
-    const parentPrefix =
-      parentObjectType && parentObjectId
-        ? `${parentObjectType}s/${parentObjectId}/`
-        : '';
+    const parentPrefix = parentObjectType && parentObjectId ? `${parentObjectType}s/${parentObjectId}/` : '';
     const versionPath = objectType === ObjectType.TASK ? 'v1' : 'beta';
     let url = `${process.env.hyperproof_api_url}/${versionPath}/${parentPrefix}${objectType}s/${objectId}/comments`;
     if (commentId) {
@@ -630,11 +564,7 @@ export class HyperproofApiClient {
     });
   }
 
-  public async getNotificationIntegrationTokenLocation(
-    orgId: string,
-    objectType: ObjectType,
-    objectId: string
-  ) {
+  public async getNotificationIntegrationTokenLocation(orgId: string, objectType: ObjectType, objectId: string) {
     const url = `${process.env.hyperproof_api_url}/beta/integrations/tokenlocation`;
     const requestBody = {
       orgId: orgId,
@@ -650,10 +580,8 @@ export class HyperproofApiClient {
           [HttpHeader.ContentType]: MimeType.APPLICATION_JSON
         }
       },
-      onErrorResponse: response =>
-        response.status === StatusCodes.NOT_FOUND ? { shouldThrow: false } : {},
-      onAnyFetchFailure: response =>
-        response.status === StatusCodes.NOT_FOUND ? { shouldBreak: true } : {}
+      onErrorResponse: response => (response.status === StatusCodes.NOT_FOUND ? { shouldThrow: false } : {}),
+      onAnyFetchFailure: response => (response.status === StatusCodes.NOT_FOUND ? { shouldBreak: true } : {})
     });
   }
 
@@ -671,9 +599,7 @@ export class HyperproofApiClient {
     });
   }
 
-  public async createExternalConnection(
-    externalConnectionPost: IExternalConnectionPostSystem
-  ) {
+  public async createExternalConnection(externalConnectionPost: IExternalConnectionPostSystem) {
     const url = `${process.env.hyperproof_api_url}/beta/externalconnections/system`;
     return this.fetchWithRetry({
       url,
@@ -687,9 +613,7 @@ export class HyperproofApiClient {
     });
   }
 
-  public async deleteExternalConnection(
-    externalConnectionFilter: IExternalConnectionFilterSystem
-  ) {
+  public async deleteExternalConnection(externalConnectionFilter: IExternalConnectionFilterSystem) {
     const url = `${process.env.hyperproof_api_url}/beta/externalconnections/system`;
     return this.fetchWithRetry({
       url,
@@ -704,39 +628,23 @@ export class HyperproofApiClient {
   }
 
   private formatFilename(filename: string, mimeType: string) {
-    const { name: nameWithoutExtension, ext: existingExtension } =
-      path.parse(filename);
-    const mimeForExistingExtension =
-      existingExtension && mime.getType(existingExtension);
+    const { ext: existingExtension } = path.parse(filename);
+    const mimeForExistingExtension = existingExtension && mime.getType(existingExtension);
 
     if (mimeForExistingExtension !== mimeType) {
-      const fileExtension = mime.getExtension(mimeType);
-
-      // NOTE:  If we need to add an additional case, we should probably convert to a
-      //        switch statement here.
-
-      // we special case csv, jira sometimes gives us the wrong mime type (text/plain)
-      // even though the extension is csv. If the file extension is csv it's okay to ignore
-      // this check and just process as a csv. See: HYP-17979 for more context
-      if (
-        mimeForExistingExtension === MimeType.CSV_MIME &&
-        fileExtension === TXT_EXTENSION
-      ) {
+      if (mimeForExistingExtension === MimeType.CSV_MIME && mime.getExtension(mimeType) === TXT_EXTENSION) {
+        // we special case csv, jira sometimes gives us the wrong mime type (text/plain)
+        // even though the extension is csv. If the file extension is csv it's okay to ignore
+        // this check and just process as a csv. See: HYP-17979 for more context
         mimeType = mimeForExistingExtension;
-      }
-      // Another special case from Jira Server.  We get back a (application/octet-stream) mime type
-      // back when requesting a ldif file. In the case of jira cloud, we get (binary/octet-stream)
-      // so we will cast to match Jira Cloud
-      else if (
+      } else if (
         mimeType === MimeType.OCTET_MIME_APP &&
         existingExtension === `.${LDIF_EXTENSION}` // append the . before the extension based on how it is split
       ) {
+        // Another special case from Jira Server.  We get back a (application/octet-stream) mime type
+        // back when requesting a ldif file. In the case of jira cloud, we get (binary/octet-stream)
+        // so we will cast to match Jira Cloud
         mimeType = MimeType.OCTET_MIME_BINARY;
-      } else {
-        // otherwise we replace the extension with the extension that maps to its mime type
-        if (fileExtension && !filename.endsWith(fileExtension)) {
-          filename = `${nameWithoutExtension}.${fileExtension}`;
-        }
       }
     }
 
@@ -747,18 +655,13 @@ export class HyperproofApiClient {
 
   private buildProofFormData(post: IProofPostBase) {
     if (post.size && Number(post.size) >= MAX_FILE_SIZE) {
-      const err = new Error(
-        `Proof from source ${post.sourceId} is larger than max file size.`
-      );
+      const err = new Error(`Proof from source ${post.sourceId} is larger than max file size.`);
       debug(err.message);
       throw err;
     }
 
     // Reformat the filename and mimeType if necessary
-    const { filename, mimeType } = this.formatFilename(
-      post.filename,
-      post.mimeType
-    );
+    const { filename, mimeType } = this.formatFilename(post.filename, post.mimeType);
 
     const formData = new FormData();
     formData.append('proof', post.file, { filename, contentType: mimeType });
@@ -805,8 +708,6 @@ export const createHyperproofApiClient = async (
   return HyperproofApiClient.createInstance(integrationContext, orgId, userId);
 };
 
-export const createHyperproofApiClientByAccessToken = async (
-  accessToken: string
-): Promise<HyperproofApiClient> => {
+export const createHyperproofApiClientByAccessToken = async (accessToken: string): Promise<HyperproofApiClient> => {
   return HyperproofApiClient.createInstanceByAccessToken(accessToken);
 };

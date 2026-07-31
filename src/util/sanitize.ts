@@ -109,9 +109,7 @@ export class Sanitize {
    *
    * Note that it does not sanitize any nested objects
    */
-  static input(
-    item: any[] | { [key: string]: any } | string | null
-  ): any[] | { [key: string]: any } | string | null {
+  static input(item: any[] | { [key: string]: any } | string | null): any[] | { [key: string]: any } | string | null {
     if (!item) {
       return item;
     }

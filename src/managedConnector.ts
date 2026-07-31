@@ -9,17 +9,8 @@ import {
 } from './hyperproof-api';
 import { FOREIGN_VENDOR_USER, HYPERPROOF_VENDOR_KEY } from './models';
 import { OAuthConnector } from './oauth-connector';
-import {
-  createConnector,
-  IHyperproofUserContext,
-  IUserConnection
-} from './sharedConnector';
-import {
-  formatUserKey,
-  getHpUserFromUserKey,
-  listAllStorageKeys,
-  parseStorageKeyFromStorageId
-} from './util';
+import { createConnector, IHyperproofUserContext, IUserConnection } from './sharedConnector';
+import { formatUserKey, getHpUserFromUserKey, listAllStorageKeys, parseStorageKeyFromStorageId } from './util';
 
 import express from 'express';
 import createHttpError from 'http-errors';
@@ -45,32 +36,18 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
        * Retrieves a list of connections created by a user.
        */
       app.get(
-        [
-          '/organizations/:orgId/users/:userId/connections',
-          '/organizations/:orgId/users/:userId/:type/connections'
-        ],
+        ['/organizations/:orgId/users/:userId/connections', '/organizations/:orgId/users/:userId/:type/connections'],
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { orgId, userId, type } = req.params;
 
-            const connections = await this.getUserConnections(
-              integrationContext,
-              orgId,
-              userId,
-              type
-            );
+            const connections = await this.getUserConnections(integrationContext, orgId, userId, type);
             if (connections.length > 0) {
               return res.json(connections);
             } else {
-              return res
-                .status(StatusCodes.NOT_FOUND)
-                .json({ message: `no user with userId ${userId} found` });
+              return res.status(StatusCodes.NOT_FOUND).json({ message: `no user with userId ${userId} found` });
             }
           } catch (err: any) {
             next(err);
@@ -83,16 +60,9 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
        * This is invoked when a Hyperproof user is deactivated.
        */
       app.delete(
-        [
-          '/organizations/:orgId/users/:userId/connections',
-          '/organizations/:orgId/users/:userId/:type/connections'
-        ],
+        ['/organizations/:orgId/users/:userId/connections', '/organizations/:orgId/users/:userId/:type/connections'],
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { orgId, userId, type } = req.params;
@@ -101,12 +71,7 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
             // For all other connections the type route parameter is not used.
             // TODO: HYP-23126: Figure out how to make this less confusing.
 
-            const connections = await this.getUserConnections(
-              integrationContext,
-              orgId,
-              userId,
-              type
-            );
+            const connections = await this.getUserConnections(integrationContext, orgId, userId, type);
 
             const results: {
               [vendorUserId: string]: { success: boolean; err: any };
@@ -152,11 +117,7 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
           '/organizations/:orgId/users/:userId/:type/connections/:vendorUserId'
         ],
         this.checkAuthorized(),
-        async (
-          req: express.Request,
-          res: express.Response,
-          next: express.NextFunction
-        ) => {
+        async (req: express.Request, res: express.Response, next: express.NextFunction) => {
           try {
             const integrationContext = req.fusebit;
             const { orgId, userId, vendorUserId } = req.params;
@@ -166,19 +127,10 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
             // case the cast below is invalid.  But Slack overrides `deleteUserConnection` and
             // ignores the type parameter, so there is no issue.  Still, we should clean this up.
 
-            await this.deleteUserConnection(
-              integrationContext,
-              orgId,
-              userId,
-              vendorUserId,
-              resource as string
-            );
+            await this.deleteUserConnection(integrationContext, orgId, userId, vendorUserId, resource as string);
 
             res.json({
-              message: `Connection for user ${formatUserKey(
-                orgId,
-                userId
-              )} successfully deleted`
+              message: `Connection for user ${formatUserKey(orgId, userId)} successfully deleted`
             });
           } catch (err: any) {
             next(err);
@@ -195,31 +147,15 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
      * @param {string} vendorId If specified, vendorUserId represents the identity of the user in another system.
      * The vendorId must correspond to an entry in userContext.foreignOAuthIdentities.
      */
-    async deleteUser(
-      integrationContext: IntegrationContext,
-      vendorUserId: string,
-      vendorId?: string
-    ) {
-      await Logger.info(`Deleting user ${vendorUserId} for vendor ${vendorId}`);
-      const user = await this.getHyperproofUserContext(
-        integrationContext,
-        vendorUserId,
-        vendorId
-      );
+    async deleteUser(integrationContext: IntegrationContext, vendorUserId: string, vendorId?: string) {
+      Logger.info(`Deleting user ${vendorUserId} for vendor ${vendorId}`);
+      const user = await this.getHyperproofUserContext(integrationContext, vendorUserId, vendorId);
 
       if (vendorId) {
         if (user) {
-          await this.deleteUserIfLast(
-            integrationContext,
-            user,
-            vendorUserId,
-            vendorId
-          );
+          await this.deleteUserIfLast(integrationContext, user, vendorUserId, vendorId);
         } else {
-          throw createHttpError(
-            StatusCodes.NOT_FOUND,
-            `No user with id ${vendorUserId} vendor: ${vendorId}`
-          );
+          throw createHttpError(StatusCodes.NOT_FOUND, `No user with id ${vendorUserId} vendor: ${vendorId}`);
         }
       } else {
         const state = this.decodeState(integrationContext);
@@ -227,16 +163,9 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
         // this delete came from authorizing
         if (user) {
           if (state && user.hyperproofIdentities) {
-            await this.deleteUserIfLast(
-              integrationContext,
-              user,
-              hpUserId,
-              'hyperproof'
-            );
+            await this.deleteUserIfLast(integrationContext, user, hpUserId, 'hyperproof');
           } else {
-            await Logger.info(
-              `no vendorId specified for user ${vendorUserId}, deleting user`
-            );
+            Logger.info(`no vendorId specified for user ${vendorUserId}, deleting user`);
             await super.deleteUser(integrationContext, vendorUserId, vendorId);
           }
         }
@@ -253,20 +182,16 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
       delete hyperproofIdentities[vendorUserId];
       const numIdentities = Object.keys(hyperproofIdentities);
       if (numIdentities.length > 0) {
-        await Logger.info(
+        Logger.info(
           `user ${vendorUserId} for vendor ${vendorId} has ${numIdentities.length} remaining hyperproof identities, not deleting user`
         );
         await super.saveUser(integrationContext, user);
-        await integrationContext.storage.delete(
-          `${FOREIGN_VENDOR_USER}/${vendorId}/${vendorUserId}`
-        );
+        await integrationContext.storage.delete(`${FOREIGN_VENDOR_USER}/${vendorId}/${vendorUserId}`);
       } else {
-        await Logger.info(
+        Logger.info(
           `user ${vendorUserId} for vendor ${vendorId} has no remaining hyperproof identities, DELETING user`
         );
-        await integrationContext.storage.delete(
-          `${FOREIGN_VENDOR_USER}/${vendorId}/${vendorUserId}`
-        );
+        await integrationContext.storage.delete(`${FOREIGN_VENDOR_USER}/${vendorId}/${vendorUserId}`);
         await super.deleteUser(integrationContext, user.vendorUserId);
       }
     }
@@ -285,26 +210,13 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
       userId: string,
       vendorUserId: string
     ) {
-      const connections = await this.getUserConnections(
-        integrationContext,
-        orgId,
-        userId
-      );
+      const connections = await this.getUserConnections(integrationContext, orgId, userId);
 
       if (connections.length === 0) {
-        await deleteHyperproofUser(integrationContext, orgId, userId).catch(
-          this.deleteUserErrorCallback
-        );
+        await deleteHyperproofUser(integrationContext, orgId, userId).catch(this.deleteUserErrorCallback);
       } else {
-        await Logger.info(
-          `Not deleting Hyperproof user ${userId} because other connections exist for this user.`
-        );
-        await removeVendorUserIdFromHyperproofUser(
-          integrationContext,
-          orgId,
-          userId,
-          vendorUserId
-        );
+        Logger.info(`Not deleting Hyperproof user ${userId} because other connections exist for this user.`);
+        await removeVendorUserIdFromHyperproofUser(integrationContext, orgId, userId, vendorUserId);
       }
     }
 
@@ -314,21 +226,14 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
      * @param {*} userContext The user context representing the vendor's user. Contains vendorToken and vendorUserProfile, representing responses
      * from getAccessToken and getUserProfile, respectively.
      */
-    async saveUser(
-      integrationContext: IntegrationContext,
-      userContext: IHyperproofUserContext
-    ) {
-      const existingUser = await this.getHyperproofUserContext(
-        integrationContext,
-        userContext.vendorUserId
-      );
+    async saveUser(integrationContext: IntegrationContext, userContext: IHyperproofUserContext) {
+      const existingUser = await this.getHyperproofUserContext(integrationContext, userContext.vendorUserId);
 
       const hyperproofIdentities = existingUser?.hyperproofIdentities ?? {};
 
       if (userContext.foreignOAuthIdentities) {
-        hyperproofIdentities[
-          userContext.foreignOAuthIdentities.hyperproof.userId
-        ] = userContext.foreignOAuthIdentities.hyperproof;
+        hyperproofIdentities[userContext.foreignOAuthIdentities.hyperproof.userId] =
+          userContext.foreignOAuthIdentities.hyperproof;
       }
 
       userContext.hyperproofIdentities = hyperproofIdentities;
@@ -337,12 +242,7 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
       // Integrations that don't require an associated hyperproof user will not have
       // this. For example, the workspace vendor-user entry for Slack integrations
       if (hpUser) {
-        await addVendorUserIdToHyperproofUser(
-          integrationContext,
-          hpUser.orgId,
-          hpUser.id,
-          userContext.vendorUserId
-        );
+        await addVendorUserIdToHyperproofUser(integrationContext, hpUser.orgId, hpUser.id, userContext.vendorUserId);
       }
 
       return super.saveUser(integrationContext, userContext);
@@ -359,25 +259,13 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
      *             that implement multiple integrations in one connector.
      * @returns An array of connections.
      */
-    async getUserConnections(
-      integrationContext: IntegrationContext,
-      orgId: string,
-      userId: string,
-      type?: string
-    ) {
+    async getUserConnections(integrationContext: IntegrationContext, orgId: string, userId: string, type?: string) {
       const connections = [];
       try {
-        const vendorUserIds = await getVendorUserIdsFromHyperproofUser(
-          integrationContext,
-          orgId,
-          userId
-        );
+        const vendorUserIds = await getVendorUserIdsFromHyperproofUser(integrationContext, orgId, userId);
         const userKey = formatUserKey(orgId, userId, type);
         for (const vendorUserId of vendorUserIds) {
-          const userContext = await this.getHyperproofUserContext(
-            integrationContext,
-            vendorUserId
-          );
+          const userContext = await this.getHyperproofUserContext(integrationContext, vendorUserId);
           if (userContext?.hyperproofIdentities[userKey]) {
             connections.push(
               await this.getUserConnectionFromUserContext(
@@ -417,10 +305,7 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
       vendorUserId: string,
       integrationType?: string
     ): Promise<IUserConnection> {
-      const userContext = await this.getHyperproofUserContext(
-        integrationContext,
-        vendorUserId
-      );
+      const userContext = await this.getHyperproofUserContext(integrationContext, vendorUserId);
       const userKey = formatUserKey(orgId, userId, integrationType);
       if (!userContext.hyperproofIdentities) {
         return this.getUserConnectionFromUserContext(userContext, userId);
@@ -459,45 +344,25 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
         // organizations.  We only want to delete the Hyperproof users in
         // the specified organization.
         const identityKeys = Object.keys(userContext.hyperproofIdentities);
-        let identitiesToDelete = identityKeys.filter(key =>
-          key.includes(orgId)
-        );
+        let identitiesToDelete = identityKeys.filter(key => key.includes(orgId));
 
         // If the optional resource was provided, use it to filter the identities.
         if (resource) {
-          identitiesToDelete = identitiesToDelete.filter(key =>
-            key.includes(resource)
-          );
+          identitiesToDelete = identitiesToDelete.filter(key => key.includes(resource));
         }
 
         // Delete the matching identities.  Note that when we delete the last
         // identity on the vendor user, the vendor user will be deleted.
-        await Logger.info(
-          `On ${
-            userContext.vendorUserId
-          }, deleting identities: ${identitiesToDelete.toString()}`
-        );
+        Logger.info(`On ${userContext.vendorUserId}, deleting identities: ${identitiesToDelete.toString()}`);
         for (const identity of identitiesToDelete) {
-          await this.deleteUserIfLast(
-            integrationContext,
-            userContext,
-            identity,
-            HYPERPROOF_VENDOR_KEY
-          );
+          await this.deleteUserIfLast(integrationContext, userContext, identity, HYPERPROOF_VENDOR_KEY);
         }
 
         // Delete the Hyperproof token if it is not being used by another connection.
         const hpUserId = this.getHpUserFromUserContext(userContext)!.id;
-        await Logger.info(`Deleting hyperproof token for ${hpUserId}`);
-        await this.deleteHyperproofUserIfUnused(
-          integrationContext,
-          orgId,
-          hpUserId,
-          userContext.vendorUserId
-        );
-        await Logger.info(
-          `Deletion finished for user ${userContext.vendorUserId}`
-        );
+        Logger.info(`Deleting hyperproof token for ${hpUserId}`);
+        await this.deleteHyperproofUserIfUnused(integrationContext, orgId, hpUserId, userContext.vendorUserId);
+        Logger.info(`Deletion finished for user ${userContext.vendorUserId}`);
       }
     }
 
@@ -517,10 +382,7 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
       vendorUserId: string,
       resource?: string
     ) {
-      const user = await this.getHyperproofUserContext(
-        integrationContext,
-        vendorUserId
-      );
+      const user = await this.getHyperproofUserContext(integrationContext, vendorUserId);
 
       if (!user) {
         throw createHttpError(
@@ -531,25 +393,12 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
 
       const userKey = this.getHyperproofUserStorageKey(orgId, userId, resource);
 
-      await this.deleteUserIfLast(
-        integrationContext,
-        user,
-        userKey,
-        HYPERPROOF_VENDOR_KEY
-      );
+      await this.deleteUserIfLast(integrationContext, user, userKey, HYPERPROOF_VENDOR_KEY);
 
-      await this.deleteHyperproofUserIfUnused(
-        integrationContext,
-        orgId,
-        userId,
-        vendorUserId
-      );
+      await this.deleteHyperproofUserIfUnused(integrationContext, orgId, userId, vendorUserId);
     }
 
-    async getAllOrgUsers(
-      integrationContext: IntegrationContext,
-      orgId: string
-    ) {
+    async getAllOrgUsers(integrationContext: IntegrationContext, orgId: string) {
       try {
         const location = `${HYPERPROOF_USER_STORAGE_ID}/organizations/${orgId}`;
         const items = await listAllStorageKeys(integrationContext, location);
@@ -557,34 +406,23 @@ export function createManagedConnector(superclass: typeof OAuthConnector) {
         const processedUsers = new Set();
         for (const item of items) {
           const hyperproofUserKey = parseStorageKeyFromStorageId(item);
-          const userKey = hyperproofUserKey.split(
-            `${HYPERPROOF_USER_STORAGE_ID}/`
-          )[1];
+          const userKey = hyperproofUserKey.split(`${HYPERPROOF_USER_STORAGE_ID}/`)[1];
           const hpUser = getHpUserFromUserKey(userKey);
 
           if (!processedUsers.has(hpUser.id)) {
-            const storageEntry = await integrationContext.storage.get(
-              hyperproofUserKey
-            );
-            const vendorUserIds = storageEntry.data.vendorUserIds || [
-              storageEntry.data.vendorUserId
-            ];
+            const storageEntry = await integrationContext.storage.get(hyperproofUserKey);
+            const vendorUserIds = storageEntry.data.vendorUserIds || [storageEntry.data.vendorUserId];
             for (const vendorUserId of vendorUserIds) {
-              const userData = (await this.getUser(
-                integrationContext,
-                vendorUserId
-              )) as IHyperproofUserContext;
+              const userData = (await this.getUser(integrationContext, vendorUserId)) as IHyperproofUserContext;
               users.push(userData);
             }
             processedUsers.add(hpUser.id);
           }
         }
-        await Logger.info(
-          `Found ${users.length} vendor-users, connected to ${items.length} hyperproof-users`
-        );
+        Logger.info(`Found ${users.length} vendor-users, connected to ${items.length} hyperproof-users`);
         return users;
       } catch (err) {
-        await Logger.error(err);
+        Logger.error(err);
         return [];
       }
     }

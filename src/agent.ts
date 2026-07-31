@@ -1,43 +1,18 @@
-import http from 'http';
-import https from 'https';
-
-const httpAgentDefaults = {
-  keepAlive: true,
-  maxSockets: 1000, // per host
-  maxTotalSockets: 5000, // total sockets across all hosts
-  maxFreeSockets: 10,
-  timeout: 60 * 1000 // 1 minute timeout for inactive sockets
-};
-const httpsAgentDefaults = {
-  ...httpAgentDefaults
-};
-
-const httpAgent: http.Agent = new http.Agent(httpAgentDefaults);
-const httpsAgent: https.Agent = new https.Agent(httpsAgentDefaults);
-
-export const getAgent = (uri: string): http.Agent | https.Agent => {
-  if (!uri) {
-    throw new Error('No URI provided to getAgent.');
-  }
-  return new URL(uri).protocol === 'https:' ? httpsAgent : httpAgent;
-};
-
 /**
- * Creates fetch options with agent conditionally included only if it exists.
- * This avoids passing undefined agent property to fetch.
+ * The shared connector HTTP agent. Implementation lives in ./util/ssrfGuard.
  *
- * @param uri - The URI for which to get the agent
- * @param baseOptions - Base fetch options to extend
- * @returns Fetch options with agent conditionally included
+ * - `getAgent` / `createFetchOptions` are SSRF-GUARDED (scheme allowlist, public DoH resolution, internal-IP denylist,
+ *   connection pinning) and must be used for all TENANT / vendor destinations. This is the default.
+ * - `getInternalAgent` / `createInternalFetchOptions` are UNGUARDED and are ONLY for trusted internal calls to the
+ *   Hyperproof / Fusebit platform itself (the add-on SDK, HyperproofApiClient, platform token endpoints), whose hosts
+ *   are system-configured and legitimately resolve to internal addresses.
+ *
+ * Re-exported here to preserve the historical `./agent` import path used across the SDK.
  */
-export const createFetchOptions = (
-  uri: string,
-  baseOptions: RequestInit = {}
-): any => {
-  const agent = getAgent(uri);
-  const options = { ...baseOptions } as any;
-
-  options.agent = agent;
-
-  return options;
-};
+export {
+  getAgent,
+  createFetchOptions,
+  getInternalAgent,
+  createInternalFetchOptions,
+  SSRF_BLOCKED_ERROR_CODE
+} from './util/ssrfGuard';

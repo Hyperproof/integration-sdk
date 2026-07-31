@@ -16,14 +16,11 @@ export interface IAsyncStore {
 
 declare global {
   // eslint-disable-next-line no-var
-  var _logger_context_async_local_storage:
-    | AsyncLocalStorage<IAsyncStore>
-    | undefined;
+  var _logger_context_async_local_storage: AsyncLocalStorage<IAsyncStore> | undefined;
 }
 
 if (!global._logger_context_async_local_storage) {
-  global._logger_context_async_local_storage =
-    new AsyncLocalStorage<IAsyncStore>();
+  global._logger_context_async_local_storage = new AsyncLocalStorage<IAsyncStore>();
 }
 
 export const asyncLocalStorage = global._logger_context_async_local_storage;

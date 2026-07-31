@@ -1,11 +1,6 @@
 import crypto from 'crypto';
 
-import {
-  debug,
-  IntegrationContext,
-  ListStorageResult,
-  StorageItem
-} from '../add-on-sdk';
+import { debug, IntegrationContext, ListStorageResult, StorageItem } from '../add-on-sdk';
 import { ObjectType } from '../models';
 
 const pluralize = (value: ObjectType) => {
@@ -26,10 +21,7 @@ export const compareValues = (
   if (s1 === undefined || s2 === undefined) {
     return compareBlanks(s1, s2);
   }
-  if (
-    (typeof s1 === 'number' && typeof s2 === 'number') ||
-    (s1 instanceof BigInt && s2 instanceof BigInt)
-  ) {
+  if ((typeof s1 === 'number' && typeof s2 === 'number') || (s1 instanceof BigInt && s2 instanceof BigInt)) {
     return s1 < s2 ? -1 : s2 > s1 ? 1 : 0;
   }
   if (typeof s1 === 'boolean' && typeof s2 === 'boolean') {
@@ -69,15 +61,8 @@ const compareBlanks = (a?: any, b?: any) => {
  * Builds a key of the form "/organizations/orgid/objectypeplural/objectid" that can
  * be used as a storage ID or in other places where a full object reference is needed.
  */
-export const formatKey = (
-  orgId: string,
-  objectType: ObjectType,
-  objectId: string,
-  suffix?: string
-) =>
-  `organizations/${orgId}/${pluralize(objectType)}/${objectId}${
-    suffix ? '/' + suffix : ''
-  }`;
+export const formatKey = (orgId: string, objectType: ObjectType, objectId: string, suffix?: string) =>
+  `organizations/${orgId}/${pluralize(objectType)}/${objectId}${suffix ? '/' + suffix : ''}`;
 
 /**
  * Builds a key of the form "/organizations/orgid/users/userid" that can
@@ -114,9 +99,7 @@ export const parseStorageKeyFromStorageId = (storageItem: StorageItem) => {
  * Given the plural form of an object type (e.g. "controls", "labels", etc.) returns
  * the ObjectType value corresponding to that value.
  */
-export const mapObjectTypesParamToType = (
-  pluralObjectType: string
-): ObjectType => {
+export const mapObjectTypesParamToType = (pluralObjectType: string): ObjectType => {
   const lowerCasePluralObjectType = pluralObjectType.toLowerCase();
   for (const type of Object.values(ObjectType)) {
     if (lowerCasePluralObjectType === `${type}s`.toLowerCase()) {
@@ -126,13 +109,9 @@ export const mapObjectTypesParamToType = (
   throw new Error('Unrecognized plural object type: ' + pluralObjectType);
 };
 
-export const listAllStorageKeys = async (
-  integrationContext: IntegrationContext,
-  storageKey: string
-) => {
+export const listAllStorageKeys = async (integrationContext: IntegrationContext, storageKey: string) => {
   const results: StorageItem[] = [];
-  let storageKeys: ListStorageResult | null =
-    await integrationContext.storage.list(storageKey);
+  let storageKeys: ListStorageResult | null = await integrationContext.storage.list(storageKey);
   while (storageKeys && storageKeys.items && storageKeys.items.length) {
     Array.prototype.push.apply(results, storageKeys.items);
     if (storageKeys.next) {
@@ -159,8 +138,7 @@ type TransformOption = {
  * @param obj any object
  * @returns whether the object is not an array and is object-like (not null and is of type 'object')
  */
-const isObject = (obj: any) =>
-  obj !== null && typeof obj === 'object' && !Array.isArray(obj);
+const isObject = (obj: any) => obj !== null && typeof obj === 'object' && !Array.isArray(obj);
 
 /**
  *
@@ -168,18 +146,13 @@ const isObject = (obj: any) =>
  * @returns whether obj is of type TransformOption
  */
 const isTransformOption = (obj: any): obj is TransformOption => {
-  const isValidSourceProp =
-    obj.sourceProp !== undefined && typeof obj.sourceProp === 'string';
+  const isValidSourceProp = obj.sourceProp !== undefined && typeof obj.sourceProp === 'string';
   // allow a straight mapping of value from source to target without further transformation
-  const isValidApplyFunc =
-    obj.applyFunc === undefined || typeof obj.applyFunc === 'function';
+  const isValidApplyFunc = obj.applyFunc === undefined || typeof obj.applyFunc === 'function';
 
-  const isValidTargetProp =
-    obj.targetProp === undefined || typeof obj.targetProp === 'string';
+  const isValidTargetProp = obj.targetProp === undefined || typeof obj.targetProp === 'string';
 
-  return (
-    isObject(obj) && isValidSourceProp && isValidApplyFunc && isValidTargetProp
-  );
+  return isObject(obj) && isValidSourceProp && isValidApplyFunc && isValidTargetProp;
 };
 
 /**
@@ -296,15 +269,11 @@ export const pickProps = (
           debug(`Prop not found on source object: ${propName}`);
         }
       } else {
-        debug(
-          `Invalid individual prop: ${prop}. Expect string | TransformOption. Received ${typeof prop}.`
-        );
+        debug(`Invalid individual prop: ${prop}. Expect string | TransformOption. Received ${typeof prop}.`);
       }
     }
   } else {
-    debug(
-      `Invalid 'props' argument. Expected Array or String but instead got ${typeof props}.`
-    );
+    debug(`Invalid 'props' argument. Expected Array or String but instead got ${typeof props}.`);
   }
 
   return target;
@@ -320,5 +289,4 @@ export const trimUrl = (url: string) => url.trim().replace(/\/+$/, '');
  * @param toHash string to hash
  * @returns a hashed string
  */
-export const computeHash = (toHash: string) =>
-  crypto.createHash('sha256').update(toHash).digest('base64url');
+export const computeHash = (toHash: string) => crypto.createHash('sha256').update(toHash).digest('base64url');

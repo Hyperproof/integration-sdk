@@ -9,4 +9,5 @@ export * from './models';
 export * from './oauth-connector';
 export * from './sharedConnector';
 export * from './TraceParent';
+export * from './metrics';
 export * from './util';

@@ -5,7 +5,8 @@ import { StatusCodes } from 'http-status-codes';
 import Superagent from 'superagent';
 
 import { IntegrationContext } from '../add-on-sdk';
-import { getAgent } from '../agent';
+// Trusted internal Hyperproof platform token calls: use the UNGUARDED agent.
+import { getInternalAgent } from '../agent';
 import {
   AuthorizationType,
   IAuthorizationConfig,
@@ -65,9 +66,7 @@ export const setHyperproofClientSecret = (clientSecret: string) => {
  * access token.  Not actually used since we avoid the first part of the
  * OAuth authorization flow but needed to complete the auth code exchange.
  */
-export const getHyperproofRedirectUrl = (
-  integrationContext: IntegrationContext
-) => {
+export const getHyperproofRedirectUrl = (integrationContext: IntegrationContext) => {
   return `${integrationContext.baseUrl}/callback`;
 };
 
@@ -146,13 +145,11 @@ export const getHyperproofAccessToken = async (
   authorizationCode: string,
   instanceType?: InstanceType
 ) => {
-  await Logger.info(
-    'Exchanging Hyperproof authorization code for an access token.'
-  );
+  Logger.info('Exchanging Hyperproof authorization code for an access token.');
   try {
     const url = process.env.hyperproof_oauth_token_url!;
     const response = await Superagent.post(url)
-      .agent(getAgent(url))
+      .agent(getInternalAgent(url))
       .type('form')
       .set({ ...TraceParent.getHeaders() })
       .send({
@@ -174,15 +171,11 @@ export const getHyperproofAccessToken = async (
     };
     await integrationContext.storage.put(
       { data: hpUserContext },
-      `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
-        orgId,
-        userId,
-        instanceType
-      )}`
+      `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(orgId, userId, instanceType)}`
     );
     return hpUserContext;
   } catch (err) {
-    await Logger.error(err);
+    Logger.error(err);
     throw err;
   }
 };
@@ -197,13 +190,11 @@ const refreshHyperproofAccessToken = async (
   integrationContext: IntegrationContext,
   hpUserContext: IHyperproofTokenContext
 ) => {
-  await Logger.debug(
-    `Refreshing Hyperproof API client using URL ${process.env.hyperproof_oauth_token_url}`
-  );
+  Logger.debug(`Refreshing Hyperproof API client using URL ${process.env.hyperproof_oauth_token_url}`);
   const currentRefreshToken = hpUserContext.hyperproofToken.refresh_token;
   const url = process.env.hyperproof_oauth_token_url!;
   const response = await Superagent.post(url)
-    .agent(getAgent(url))
+    .agent(getInternalAgent(url))
     .type('form')
     .set({ ...TraceParent.getHeaders() })
     .send({
@@ -240,11 +231,27 @@ export const ensureHyperproofAccessToken = async (
   const userEntry = await integrationContext.storage.get(userEntryKey);
   if (!userEntry) {
     const errMessage = `No Hyperproof access token found for '${userEntryKey}'. The connection may have been deleted`;
-    await Logger.error(errMessage);
+    Logger.error(errMessage);
     throw createHttpError(StatusCodes.UNAUTHORIZED, errMessage);
   }
 
+  // Validate that the token data we got from storage looks correct before we try to use it.
+  const isValidStoredHyperproofToken = (
+    token: unknown
+  ): token is Pick<IHyperproofUserToken, 'access_token' | 'refresh_token' | 'expires_at'> =>
+    !!token &&
+    typeof token === 'object' &&
+    (typeof (token as Partial<IHyperproofUserToken>).access_token === 'string' ||
+      typeof (token as Partial<IHyperproofUserToken>).refresh_token === 'string') &&
+    ((token as Partial<IHyperproofUserToken>).expires_at === undefined ||
+      typeof (token as Partial<IHyperproofUserToken>).expires_at === 'number');
+
   const hpUserContext: IHyperproofTokenContext = userEntry.data;
+  if (!isValidStoredHyperproofToken(hpUserContext?.hyperproofToken)) {
+    const errMessage = `Hyperproof token data is missing or malformed for '${userEntryKey}'. The connection may need to be re-established.`;
+    Logger.info(errMessage);
+    throw createHttpError(StatusCodes.UNAUTHORIZED, errMessage);
+  }
   const hyperproofToken = hpUserContext.hyperproofToken;
 
   if (
@@ -252,44 +259,33 @@ export const ensureHyperproofAccessToken = async (
     (hyperproofToken.expires_at === undefined ||
       hyperproofToken.expires_at > Date.now() + ACCESS_TOKEN_EXPIRATION_BUFFER)
   ) {
-    await Logger.info(
-      `Returning current Hyperproof access token for user ${userKey}`
-    );
+    Logger.info(`Returning current Hyperproof access token for user ${userKey}`);
     return hyperproofToken.access_token;
   }
 
   if (!hyperproofToken.refresh_token) {
-    const errMessage =
-      'Hyperproof access token is missing or expired but no refresh token exists.';
-    await Logger.error(errMessage);
+    const errMessage = 'Hyperproof access token is missing or expired but no refresh token exists.';
+    Logger.error(errMessage);
     throw createHttpError(StatusCodes.UNAUTHORIZED, errMessage);
   }
 
-  await Logger.info(
+  Logger.info(
     `Hyperproof access token is missing or expired. Refreshing access token for user/${userId} in org/${orgId}.`
   );
   try {
-    hpUserContext.hyperproofToken = await refreshHyperproofAccessToken(
-      integrationContext,
-      hpUserContext
-    );
+    hpUserContext.hyperproofToken = await refreshHyperproofAccessToken(integrationContext, hpUserContext);
   } catch (err: any) {
     // If we received a bad request result it may be because another thread
     // refreshed the token at the same time.  Catch this case and try again.
     if (err.status === StatusCodes.BAD_REQUEST && retryOnFailedRefresh) {
-      await Logger.info(
+      Logger.info(
         `Hyperproof access token is missing or expired. Attempting to refresh access token after failure for user/${userId} in org/${orgId}.`
       );
       return sleep(TOKEN_REFRESH_RETRY_DELAY).then(() => {
-        return ensureHyperproofAccessToken(
-          integrationContext,
-          orgId,
-          userId,
-          instanceType,
-          false
-        );
+        return ensureHyperproofAccessToken(integrationContext, orgId, userId, instanceType, false);
       });
     } else {
+      Logger.info(`Hyperproof access token is missing or expired for user/${userId} in org/${orgId}.`);
       throw createHttpError(
         StatusCodes.UNAUTHORIZED,
         'Hyperproof access token refresh failed. Please try re-creating your connection.',
@@ -305,13 +301,10 @@ export const ensureHyperproofAccessToken = async (
   try {
     // Note that we provide no etag here. We always want to force-write the
     // new token because it matches what exists in the Hyperproof database.
-    await integrationContext.storage.put(
-      { data: hpUserContext },
-      `${HYPERPROOF_USER_STORAGE_ID}/${userKey}`
-    );
+    await integrationContext.storage.put({ data: hpUserContext }, `${HYPERPROOF_USER_STORAGE_ID}/${userKey}`);
   } catch (err: any) {
     // HYP-16748: If we got an error saving the token, raise an alert.
-    await Logger.error(
+    Logger.error(
       `OAuth Access Token Error: Got new access token from Hyperproof for organizations/${orgId}/users/${userId}, but save to storage failed with status: ${err.status}`,
       err
     );
@@ -340,11 +333,7 @@ export const getVendorUserIdsFromHyperproofUser = async (
   instanceType?: InstanceType
 ) => {
   const entry = await integrationContext.storage.get(
-    `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
-      orgId,
-      userId,
-      instanceType
-    )}`
+    `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(orgId, userId, instanceType)}`
   );
   if (!entry) {
     throw createHttpError(StatusCodes.UNAUTHORIZED, 'User is not authorized.');
@@ -355,9 +344,7 @@ export const getVendorUserIdsFromHyperproofUser = async (
   // vendorUserIds in storage return that.  Otherwise turn the old single vendorUserId
   // into an array and use that.  If the Hyperproof user ever adds a second connection
   // we will convert to the array form and delete the old vendorUserId.
-  return entry.data.vendorUserIds
-    ? entry.data.vendorUserIds
-    : [entry.data.vendorUserId.toString()]; // See HYP-16740
+  return entry.data.vendorUserIds ? entry.data.vendorUserIds : [entry.data.vendorUserId.toString()]; // See HYP-16740
 };
 
 /**
@@ -376,11 +363,7 @@ export const addVendorUserIdToHyperproofUser = async (
   vendorUserId: string,
   instanceType?: InstanceType
 ) => {
-  const storageKey = `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
-    orgId,
-    userId,
-    instanceType
-  )}`;
+  const storageKey = `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(orgId, userId, instanceType)}`;
   const entry = await integrationContext.storage.get(storageKey);
 
   // If the Hyperproof user entry does not exist there is no work to do.
@@ -390,9 +373,7 @@ export const addVendorUserIdToHyperproofUser = async (
     return;
   }
 
-  await Logger.info(
-    `Adding vendor user ${vendorUserId} to user ${userId} in org ${orgId}.`
-  );
+  Logger.info(`Adding vendor user ${vendorUserId} to user ${userId} in org ${orgId}.`);
 
   // In the initial implementation we only stored a single vendorUserId.  Convert
   // that entry to an array if we are adding a new vendor user link.
@@ -407,10 +388,7 @@ export const addVendorUserIdToHyperproofUser = async (
   hpUserContext.vendorUserIds = [...vendorUserIds];
   delete hpUserContext.vendorUserId;
 
-  await integrationContext.storage.put(
-    { data: hpUserContext, etag: entry.etag },
-    storageKey
-  );
+  await integrationContext.storage.put({ data: hpUserContext, etag: entry.etag }, storageKey);
 };
 
 /**
@@ -429,14 +407,8 @@ export const removeVendorUserIdFromHyperproofUser = async (
   vendorUserId: string,
   instanceType?: InstanceType
 ) => {
-  await Logger.info(
-    `Removing vendor user ${vendorUserId} from user ${userId} in org ${orgId}.`
-  );
-  const storageKey = `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
-    orgId,
-    userId,
-    instanceType
-  )}`;
+  Logger.info(`Removing vendor user ${vendorUserId} from user ${userId} in org ${orgId}.`);
+  const storageKey = `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(orgId, userId, instanceType)}`;
   const entry = await integrationContext.storage.get(storageKey);
   if (!entry) {
     throw createHttpError(StatusCodes.UNAUTHORIZED, 'User is not authorized.');
@@ -444,15 +416,10 @@ export const removeVendorUserIdFromHyperproofUser = async (
 
   const hpUserContext: IHyperproofTokenContext = entry.data;
   if (hpUserContext.vendorUserIds) {
-    hpUserContext.vendorUserIds = hpUserContext.vendorUserIds.filter(
-      v => v !== vendorUserId
-    );
+    hpUserContext.vendorUserIds = hpUserContext.vendorUserIds.filter(v => v !== vendorUserId);
   }
 
-  await integrationContext.storage.put(
-    { data: hpUserContext, etag: entry.etag },
-    storageKey
-  );
+  await integrationContext.storage.put({ data: hpUserContext, etag: entry.etag }, storageKey);
 };
 
 /**
@@ -474,35 +441,23 @@ export const deleteHyperproofUser = async (
   // we can't reach Hyperproof for some reason, nor is it all that
   // bad if Hyperproof fails to delete the token.
   try {
-    await Logger.info(
+    Logger.info(
       `Notifying Hyperproof that user is being deleted. org: ${orgId} user: ${userId} instanceType ${instanceType}`
     );
-    const accessToken = await ensureHyperproofAccessToken(
-      integrationContext,
-      orgId,
-      userId,
-      instanceType
-    );
+    const accessToken = await ensureHyperproofAccessToken(integrationContext, orgId, userId, instanceType);
     const url = `${process.env.hyperproof_oauth_token_url}/organizations/${orgId}`;
     await Superagent.delete(url)
-      .agent(getAgent(url))
+      .agent(getInternalAgent(url))
       .send({ client_secret: hyperproofClientSecret })
       .set({
         ...TraceParent.getHeaders(),
         Authorization: `Bearer ${accessToken}`
       });
   } catch (err: any) {
-    await Logger.error(
-      'Failed to notify Hyperproof that user is being deleted.',
-      err
-    );
+    Logger.error('Failed to notify Hyperproof that user is being deleted.', err);
   }
 
   return integrationContext.storage.delete(
-    `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(
-      orgId,
-      userId,
-      instanceType
-    )}`
+    `${HYPERPROOF_USER_STORAGE_ID}/${formatUserKey(orgId, userId, instanceType)}`
   );
 };
