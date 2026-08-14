@@ -89,6 +89,35 @@ describe('validateCredentialFields', () => {
     expect(() => validateCredentialFields({ gitLabUrl: 'http://hpgitlab.example.com/' }, meta)).not.toThrow();
   });
 
+  it('allows a fully-qualified AWS ARN in a plain Text field', () => {
+    // aws-declarative's `arn` field is CredentialFieldType.Text with no validation; a real cross-account role ARN
+    // contains '/' in its resource segment and has no '://', so it previously tripped the host-breakout check.
+    const meta = metadata([{ name: 'arn', type: CredentialFieldType.Text, label: 'Role ARN' }]);
+    expect(() =>
+      validateCredentialFields({ arn: 'arn:aws:iam::123456789012:role/MyCrossAccountRole' }, meta)
+    ).not.toThrow();
+    expect(() =>
+      validateCredentialFields({ arn: 'arn:aws-us-gov:iam::123456789012:role/GovCloudRole' }, meta)
+    ).not.toThrow();
+  });
+
+  it('rejects a value with a malicious suffix tacked onto a valid-looking ARN prefix', () => {
+    // The ARN exemption must not let an attacker smuggle a host-breakout payload past the check by prefixing it
+    // with something ARN-shaped: userinfo '@' + fragment '#' would resolve to attacker host `evil.com` if this
+    // value were interpolated into a vendor-URL template.
+    const meta = metadata([{ name: 'arn', type: CredentialFieldType.Text, label: 'Role ARN' }]);
+    expect(() => validateCredentialFields({ arn: 'arn:x:x:x:x:x@evil.com#' }, meta)).toThrow();
+  });
+
+  it.each([
+    ['a hash appended after a real resource path', 'arn:aws:iam::123456789012:role/MyRole#evil.com'],
+    ['a breakout character inside a middle segment', 'arn:evil.com#:iam::123456789012:role/x'],
+    ['trailing whitespace', 'arn:aws:iam::123456789012:role/MyRole ']
+  ])('rejects a malformed or suffixed ARN-like value: %s', (_description, value) => {
+    const meta = metadata([{ name: 'arn', type: CredentialFieldType.Text, label: 'Role ARN' }]);
+    expect(() => validateCredentialFields({ arn: value }, meta)).toThrow();
+  });
+
   it('never inspects Password (secret) or Hidden fields', () => {
     const meta = metadata([
       { name: 'apiKey', type: CredentialFieldType.Password, label: 'API Key' },
@@ -96,6 +125,20 @@ describe('validateCredentialFields', () => {
     ]);
     // Secrets can legitimately contain '/', '@', '+', etc.
     expect(() => validateCredentialFields({ apiKey: 'abc/def+gh==@x', secret: 'anything#' }, meta)).not.toThrow();
+  });
+
+  it('never inspects TextArea fields (multi-line blobs, not URL-template tokens)', () => {
+    const meta = metadata([{ name: 'privateKey', type: CredentialFieldType.TextArea, label: 'Private Key' }]);
+    // A real PEM private key is multi-line (whitespace) and its base64 body commonly contains '/', both of which
+    // previously tripped the host-breakout check.
+    const pemKey = [
+      '-----BEGIN PRIVATE KEY-----',
+      'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj',
+      'MzEfYyjiWA4R4/M2bS1GB4t7NXp98C3SC6dVMvDuictGeurT8jNbvJZHtCSuYEvu',
+      'NMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s+CLOyS56YyCFGeJZ',
+      '-----END PRIVATE KEY-----'
+    ].join('\n');
+    expect(() => validateCredentialFields({ privateKey: pemKey }, meta)).not.toThrow();
   });
 
   it('recurses into Group fields', () => {

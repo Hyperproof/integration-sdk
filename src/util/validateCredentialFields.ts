@@ -36,6 +36,13 @@ const HOST_BREAKOUT_PATTERN = /[#?/\\@\s]/;
 // is exempt from the host-breakout check (which would otherwise reject the URL's own '/' and ':').
 const FULL_URL_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 
+// A value that is itself a fully-qualified AWS ARN (arn:partition:service:region:account-id:resource, e.g.
+// `arn:aws:iam::123456789012:role/MyRole`) is a complete, well-formed identifier passed to the AWS SDK - not a
+// vendor-template token - and legitimately contains '/' and ':' in its resource segment. Anchored at both ends and
+// excluding breakout characters from every segment so a malicious suffix (e.g. `arn:x:x:x:x:x@evil.com#`) can't
+// piggyback on a valid-looking ARN prefix and slip through unexamined.
+const ARN_PATTERN = /^arn:[^:#?\\@\s]*:[^:#?\\@\s]*:[^:#?\\@\s]*:[^:#?\\@\s]*:[^#?\\@\s]+$/;
+
 // Validation types whose values legitimately contain URL/host/email punctuation and are not vendor-template tokens.
 const URLISH_VALIDATION_TYPES: ReadonlySet<string> = new Set([
   ValidationTypes.url,
@@ -51,7 +58,13 @@ const validateField = (field: ICredentialField, credentials: CustomAuthCredentia
     return;
   }
   // Secrets are vendor-controlled in format and are never interpolated into a host, so we do not inspect them.
-  if (field.type === CredentialFieldType.Hidden || field.type === CredentialFieldType.Password) {
+  // TextArea values (private keys, JSON key files, etc.) are multi-line blobs, never a single-token template value
+  // interpolated into a host, so the host-breakout check does not apply to them either.
+  if (
+    field.type === CredentialFieldType.Hidden ||
+    field.type === CredentialFieldType.Password ||
+    field.type === CredentialFieldType.TextArea
+  ) {
     return;
   }
 
@@ -74,7 +87,7 @@ const validateField = (field: ICredentialField, credentials: CustomAuthCredentia
     return;
   }
 
-  if (FULL_URL_PATTERN.test(value)) {
+  if (FULL_URL_PATTERN.test(value) || ARN_PATTERN.test(value)) {
     return;
   }
 
