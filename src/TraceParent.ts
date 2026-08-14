@@ -2,9 +2,7 @@ import { getAsyncStore } from './asyncStore';
 import { HttpHeader } from './models';
 
 export class TraceParent {
-  public static getHeaders():
-    | { traceparent: string; baggage?: string }
-    | object {
+  public static getHeaders(): { traceparent: string; baggage?: string } | object {
     const store = getAsyncStore();
     if (!store?.traceParent) return {};
     const headers: any = {

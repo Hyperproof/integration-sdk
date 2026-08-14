@@ -31,7 +31,7 @@ export interface ILocalizable {
   timeZone: string;
 }
 
-export interface IExternalUser {
+export interface IExternalUserRef {
   id: string;
   givenName: string;
   surname?: string;
@@ -40,13 +40,13 @@ export interface IExternalUser {
   avatarUrl?: string;
 }
 
-export interface IExternalGroup {
+export interface IExternalGroupRef {
   id: string;
   name: string;
   avatarUrl?: string;
 }
 
-export type ExternalPrincipal = IExternalUser | IExternalGroup;
+export type ExternalPrincipalRef = IExternalUserRef | IExternalGroupRef;
 
 export interface IExternalGroupLink extends IOrgObject {
   groupId?: string;
@@ -55,11 +55,51 @@ export interface IExternalGroupLink extends IOrgObject {
   instanceIntegrationId: string;
 }
 
+export interface IExternalUser extends IOrgObject {
+  appId: string;
+  externalUserId: string;
+  name?: string;
+  email?: string;
+  avatarUrl?: string;
+  instanceIntegrationId: string;
+}
+
+// Narrows an assignee that may be a Hyperproof org user (UserMapping) or an external principal
+// (ExternalAssignee). An external user carries externalUserId; an IOrgUser does not.
+export function isExternalUser(assignee: IOrgUser | IExternalUser): assignee is IExternalUser {
+  return (assignee as IExternalUser).externalUserId !== undefined;
+}
+
+export interface IExternalGroup extends IOrgObject {
+  appId: string;
+  externalGroupId: string;
+  name?: string;
+  avatarUrl?: string;
+  instanceIntegrationId: string;
+}
+
+export interface IExternalUserAssignmentPost {
+  appId: string;
+  externalUserId: string;
+  name?: string;
+  email?: string;
+  avatarUrl?: string;
+  instanceIntegrationId: string;
+}
+
+export interface IExternalGroupAssignmentPost {
+  appId: string;
+  externalGroupId: string;
+  name?: string;
+  avatarUrl?: string;
+  instanceIntegrationId: string;
+}
+
 export interface ICommentBody {
   appId?: string;
   commentTextFormatted?: string;
-  externalUser?: IExternalUser;
-  mentionedExternalUsers?: IExternalUser[];
+  externalUser?: IExternalUserRef;
+  mentionedExternalUsers?: IExternalUserRef[];
   sourceCommentId: string;
   sourceUpdatedOn: string;
 }
@@ -72,14 +112,16 @@ export enum TaskSyncResult {
 }
 
 export interface ITaskSyncState {
-  assignee: ITaskFieldSyncState;
-  description: ITaskFieldSyncState;
-  title: ITaskFieldSyncState;
-  proof: ITaskFieldSyncState;
-  status: ITaskFieldSyncState;
-  dueDate: ITaskFieldSyncState;
-  comment: ITaskFieldSyncState;
-  group: ITaskFieldSyncState;
+  assignee?: ITaskFieldSyncState;
+  description?: ITaskFieldSyncState;
+  title?: ITaskFieldSyncState;
+  proof?: ITaskFieldSyncState;
+  status?: ITaskFieldSyncState;
+  dueDate?: ITaskFieldSyncState;
+  comment?: ITaskFieldSyncState;
+  externalAssignee?: ITaskFieldSyncState;
+  externalGroup?: ITaskFieldSyncState;
+  group?: ITaskFieldSyncState;
 }
 
 export interface ITaskFieldSyncState {
@@ -109,13 +151,70 @@ export interface IIntegrationSettingsBase {
   relatedSettingsId?: string;
 }
 
-export interface IIntegration<
-  TIntegrationSettings extends IIntegrationSettingsBase
-> extends IOrgObject {
+export interface IIntegration<TIntegrationSettings extends IIntegrationSettingsBase> extends IOrgObject {
   appId: string;
   objectId: string;
   objectType: ObjectType;
   settings: TIntegrationSettings;
+}
+
+export interface ITaskIntegrationSettings extends IIntegrationSettingsBase {
+  class: IntegrationSettingsClass.TaskIntegrationSettings;
+  id: string;
+  key?: string;
+  name?: string;
+  attachmentSyncHistory?: IAttachmentMap;
+  externalSyncState?: ITaskSyncState;
+  syncAttemptedOn?: string;
+  failureMessage?: string;
+  lastProcessedActivityId?: string;
+  lastProcessedCommentId?: string;
+  permalinkUrl: string;
+  projectId: string;
+  syncState?: ITaskFieldSyncState;
+  ticketTypeId: string;
+  usesExternalAssignee?: boolean;
+}
+
+export type ITaskIntegration = IIntegration<ITaskIntegrationSettings>;
+
+// Map of attachmentId to proofId
+export interface IAttachmentMap {
+  [key: string]: string | undefined;
+}
+
+export interface IInstanceIntegrationSettings extends IIntegrationSettingsBase {
+  class: IntegrationSettingsClass.InstanceIntegrationSettings;
+  hostUrl: string;
+  isConfigured: boolean;
+  projects: ITaskAppProject[];
+  ticketTypes?: ITicketType[];
+}
+
+export type IInstanceIntegration = IIntegration<IInstanceIntegrationSettings>;
+
+export interface ITaskAppProject {
+  id: string;
+  name: string;
+  key?: string;
+  statusMap?: IStatusMap;
+  ticketTypes?: ITicketType[];
+  defaultTicketType?: ITicketType;
+}
+
+export interface ITicketType {
+  id: string;
+  name: string;
+  statusMap?: IStatusMap;
+}
+
+export interface IStatusMap {
+  [taskStatusId: string]: ITicketStatus[];
+}
+
+export interface ITicketStatus {
+  id: string;
+  name: string;
 }
 
 export interface IIntegrationPostSystem {
@@ -161,7 +260,6 @@ export interface ITask extends IOrgObject {
   targetObjectStatus: ObjectStatus;
   taskStatusId: string;
   priority: Priority;
-  sortOrder: number;
   dueDate?: string;
   scopeName?: string;
   targetName: string;
@@ -190,16 +288,20 @@ export enum TaskStatusType {
 
 // Used for updating a Hyperproof task
 export interface ITaskPatch {
+  assigneeType?: ObjectType;
+  clearAssigneeId?: boolean;
   clearDueDate?: boolean;
   clearGroupId?: boolean;
   comments?: IActivity[];
   description?: string;
   dueDate?: string;
-  externalAssignee?: IExternalUser;
+  externalAssignee?: IExternalUserAssignmentPost;
+  externalAssigneeRef?: IExternalUserRef;
   externalFields?: any;
-  externalGroup?: IExternalGroup;
-  externalUser?: IExternalUser;
-  groupId?: string;
+  externalGroup?: IExternalGroupAssignmentPost;
+  externalGroupRef?: IExternalGroupRef;
+  externalUser?: IExternalUserRef;
+  groupType?: ObjectType;
   priority?: Priority;
   taskStatusId?: string;
   taskTemplateId?: string;
@@ -211,13 +313,18 @@ export interface ITaskPatch {
 export interface ITicketPatch {
   clearAssigneeId?: boolean;
   clearDueDate?: boolean;
+  clearGroupId?: boolean;
   comments?: IActivity[];
   description?: string;
   dueDate?: string;
   externalAssignee?: IExternalUser;
+  externalGroup?: IExternalGroup;
+  externalAssigneeRef?: IExternalUserRef;
   externalFields?: any;
   externalGroupLink?: IExternalGroupLink;
-  externalUser?: IExternalUser;
+  externalUser?: IExternalUserRef;
+  externalUserMap?: { [externalUserId: string]: IExternalUser };
+  externalGroupMap?: { [externalGroupId: string]: IExternalGroup };
   externalUserLinkPairMap?: IExternalUserLinkPairMap;
   externalUserLinks?: IExternalUserLink[];
   group?: string;
@@ -228,8 +335,10 @@ export interface ITicketPatch {
   title?: string;
 }
 
+export type IExternalFieldValue = string | string[] | object | number;
+
 export interface IExternalFields {
-  [id: string]: string | string[] | object | number;
+  [id: string]: IExternalFieldValue;
 }
 
 export interface IExternalUserLinkPairMap {
@@ -256,7 +365,7 @@ export interface IProofPostBase {
   sourceFileId: string;
   sourceModifiedOn?: string;
   sourceIntegrationId?: string;
-  user?: IExternalUser;
+  user?: IExternalUserRef;
   size?: number;
 }
 
@@ -277,7 +386,7 @@ export interface IArchiveProofLinkPost {
   proofId: string;
   objectId: string;
   objectType: ObjectType;
-  externalUser?: IExternalUser;
+  externalUser?: IExternalUserRef;
 }
 
 export interface IActivity extends IOrgObject {
@@ -311,6 +420,7 @@ export interface IOrgUser extends IOrgObject {
   type: string;
   givenName: string;
   surname: string;
+  email?: string;
   externalUserLinks: IExternalUserLink[];
   roleIds: string[];
   lastLogin: string;
@@ -373,6 +483,12 @@ export interface IExternalPermission {
 export interface ISelectOption {
   value: string | number;
   label: string;
+  /**
+   * When true the option is a valid value for the field (accepted by server-side credential validation) but is not
+   * offered in the UI dropdown. Used for values that are set programmatically rather than chosen by the user - e.g.
+   * a region that is auto-discovered from the vendor's response but must still pass the SSRF field allow-list.
+   */
+  hidden?: boolean;
 }
 
 export interface IExTag {

@@ -1,4 +1,4 @@
-export enum ALERT_CARD_STYLE {
+enum AlertCardStyle {
   Success = 'success',
   Info = 'info',
   Warning = 'warning',
@@ -6,17 +6,12 @@ export enum ALERT_CARD_STYLE {
   Danger = 'danger'
 }
 
-export enum CriteriaPageMessageLevel {
-  Success = 'success',
-  Info = 'info',
-  Warning = 'warning',
-  Failure = 'failure',
-  Danger = 'danger'
-}
+export { AlertCardStyle, AlertCardStyle as CriteriaPageMessageLevel, AlertCardStyle as ALERT_CARD_STYLE };
 
 export enum AuthorizationType {
   OAUTH = 'oauth',
-  CUSTOM = 'custom'
+  CUSTOM = 'custom',
+  MERGE_LINK = 'mergeLink'
 }
 
 export enum AppId {
@@ -75,6 +70,9 @@ export enum MimeType {
 
 export enum ObjectType {
   CONTROL = 'control',
+  EXTERNAL_GROUP = 'externalGroup',
+  EXTERNAL_USER = 'externalUser',
+  GROUP = 'group',
   LABEL = 'label',
   ORGANIZATION = 'organization',
   TASK = 'task',
@@ -141,6 +139,14 @@ export enum HealthStatus {
   Unhealthy = 'unhealthy',
   Unknown = 'unknown',
   NotImplemented = 'notImplemented'
+}
+
+export enum HyperproofErrorCode {
+  HyperproofOAuthorizationExpired = 'hyperproofOAuthorizationExpired'
+}
+
+export enum InfoAction {
+  Authorize = 'authorize'
 }
 
 export const HYPERPROOF_VENDOR_KEY = 'hyperproof';

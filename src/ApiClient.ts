@@ -1,6 +1,8 @@
 import { createFetchOptions } from './agent';
 import { getAsyncStore } from './asyncStore';
 import { Logger } from './hyperproof-api';
+import { extractHostname, httpActiveRequests, httpRequestDuration, httpRequestErrors } from './metrics';
+import { safeMetric } from './util/safeMetric';
 import { HttpMethod, LogContextKey } from './models';
 import { IThrottleModel, ThrottleManager } from './util';
 
@@ -57,10 +59,7 @@ export interface IErrorMessagePattern {
 export class ApiClient {
   protected baseUrl?: string;
   protected headers: HeadersInit;
-  private throttleManager: ThrottleManager<
-    ApiClientRequestArgs,
-    ResponseWithApiUrl
-  >;
+  private throttleManager: ThrottleManager<ApiClientRequestArgs, ResponseWithApiUrl>;
 
   /**
    * @param commonHeaders Headers to add to all API requests.
@@ -73,11 +72,7 @@ export class ApiClient {
    *        of the quantity of retries is left to the JobEngine and the suggested delay time
    *        after a retry will not necessarily grow exponentially.
    */
-  constructor(
-    commonHeaders: HeadersInit,
-    baseUrl?: string,
-    throttleModel?: IThrottleModel
-  ) {
+  constructor(commonHeaders: HeadersInit, baseUrl?: string, throttleModel?: IThrottleModel) {
     const store = getAsyncStore();
     if (store?.externalServiceHeaders) {
       this.headers = { ...commonHeaders, ...store.externalServiceHeaders };
@@ -85,10 +80,7 @@ export class ApiClient {
       this.headers = commonHeaders;
     }
     this.baseUrl = baseUrl;
-    this.throttleManager = new ThrottleManager(
-      params => this.buildApiUrlAndFetch({ ...params }),
-      throttleModel
-    );
+    this.throttleManager = new ThrottleManager(params => this.buildApiUrlAndFetch({ ...params }), throttleModel);
   }
 
   public setRetryCount(retryCount: number) {
@@ -97,6 +89,10 @@ export class ApiClient {
 
   public setBaseUrl(baseUrl: string) {
     this.baseUrl = baseUrl;
+  }
+
+  public getBaseUrl() {
+    return this.baseUrl;
   }
 
   public async getUnprocessedResponse(
@@ -116,11 +112,7 @@ export class ApiClient {
     return response;
   }
 
-  public async getJson(
-    url: string,
-    headers?: { [key: string]: string },
-    abortController?: AbortController
-  ) {
+  public async getJson(url: string, headers?: { [key: string]: string }, abortController?: AbortController) {
     return this.doSendRequest({
       url,
       method: HttpMethod.GET,
@@ -184,7 +176,7 @@ export class ApiClient {
    * handling of that connector and/or its target API.
    *
    * This will require the connector to implement its own ApiClient that
-   * extends this base ApiClient class, and pass via the data source contructor
+   * extends this base ApiClient class, and pass via the data source constructor
    * the custom ApiClient class to be used.
    */
   public getErrorMessageStatusPatterns(): IErrorMessagePattern[] {
@@ -200,11 +192,7 @@ export class ApiClient {
   }
 
   protected async getStatusCodeFromErrorMessage(error?: any): Promise<number> {
-    const status: string =
-      error?.code?.toString() ||
-      error?.statusCode?.toString() ||
-      error?.status?.toString() ||
-      '';
+    const status: string = error?.code?.toString() || error?.statusCode?.toString() || error?.status?.toString() || '';
     const message: string = error?.message || '';
 
     if (!status && !message) {
@@ -214,18 +202,15 @@ export class ApiClient {
     const patterns = this.getErrorMessageStatusPatterns();
 
     for (const errorPattern of patterns) {
-      if (
-        (!errorPattern.fromStatus || errorPattern.fromStatus === status) &&
-        errorPattern.messageMatch.test(message)
-      ) {
-        await Logger.info(
+      if ((!errorPattern.fromStatus || errorPattern.fromStatus === status) && errorPattern.messageMatch.test(message)) {
+        Logger.info(
           `Mapped error status ${status} to status ${errorPattern.toStatus} using pattern ${errorPattern.name}`
         );
         return errorPattern.toStatus;
       }
     }
 
-    await Logger.warn(
+    Logger.warn(
       `No matching error pattern found for error status: ${status}, message: ${message}`,
       typeof error === 'object' ? JSON.stringify(error) : undefined
     );
@@ -250,12 +235,12 @@ export class ApiClient {
     });
   }
 
-  protected async handleFailedResponse(response: Response, apiUrl: string) {
+  protected async handleFailedResponse(response: Response, apiUrl: string, method: string) {
     const errMsg = await response.text();
-    await Logger.warn(`Error retrieving JSON from ${apiUrl}: ${errMsg}`);
+    Logger.warn(`Error retrieving JSON from ${method}: ${apiUrl}: ${errMsg}`);
     throw createHttpError(
       response.status ?? StatusCodes.INTERNAL_SERVER_ERROR,
-      `Error retrieving JSON from ${apiUrl}: ${errMsg}`,
+      `Error retrieving JSON from ${method}: ${apiUrl}: ${errMsg}`,
       {
         [LogContextKey.Headers]: response.headers.raw(),
         [LogContextKey.StatusCode]: response.status,
@@ -269,10 +254,7 @@ export class ApiClient {
    * On a successful response, where response.ok is true, this method will be called
    * to parse the body into a JSON object. Returns undefined when the body is empty.
    */
-  protected async parseResponseBodyJson(
-    response: Response,
-    url: string
-  ): Promise<any | undefined> {
+  protected async parseResponseBodyJson(response: Response, url: string): Promise<any | undefined> {
     if (response.status === StatusCodes.NO_CONTENT) {
       return;
     }
@@ -285,16 +267,12 @@ export class ApiClient {
       json = JSON.parse(text);
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
     } catch (e: any) {
-      throw createHttpError(
-        StatusCodes.INTERNAL_SERVER_ERROR,
-        'Failed to convert response body to JSON',
-        {
-          [LogContextKey.Headers]: response.headers.raw(),
-          [LogContextKey.StatusCode]: response.status,
-          [LogContextKey.ApiUrl]: url,
-          [LogContextKey.ExtendedMessage]: `Response Body: ${text}`
-        }
-      );
+      throw createHttpError(StatusCodes.INTERNAL_SERVER_ERROR, 'Failed to convert response body to JSON', {
+        [LogContextKey.Headers]: response.headers.raw(),
+        [LogContextKey.StatusCode]: response.status,
+        [LogContextKey.ApiUrl]: url,
+        [LogContextKey.ExtendedMessage]: `Response Body: ${text}`
+      });
     }
     return json;
   }
@@ -341,8 +319,18 @@ export class ApiClient {
     const headers = { ...this.headers, ...additionalHeaders };
     const headerNames = Object.keys(headers);
 
-    await Logger.info(
-      `Making ${method} request to ${apiUrl}. Header names: ${headerNames}`
+    Logger.info(`Making ${method} request to ${apiUrl}. Header names: ${headerNames}`);
+
+    const integrationType = process.env.integration_type ?? 'unknown';
+    const targetHost = extractHostname(apiUrl);
+
+    safeMetric(() => httpActiveRequests.inc({ integration_type: integrationType, target_host: targetHost }));
+    const end = safeMetric(() =>
+      httpRequestDuration.startTimer({
+        integration_type: integrationType,
+        method,
+        target_host: targetHost
+      })
     );
 
     let response: Response;
@@ -357,17 +345,32 @@ export class ApiClient {
         })
       );
     } catch (err) {
+      // Record metrics for network errors
+      safeMetric(() => {
+        end?.({ status: 'error' });
+        const errorCode = err instanceof Error ? err.name : 'unknown';
+        httpRequestErrors.inc({
+          integration_type: integrationType,
+          error_code: errorCode,
+          target_host: targetHost
+        });
+      });
       // Complete failure to make the request
       throw await this.handleNetworkError(err);
+    } finally {
+      safeMetric(() => httpActiveRequests.dec({ integration_type: integrationType, target_host: targetHost }));
     }
+
+    // Record successful response duration
+    safeMetric(() => end?.({ status: String(response.status) }));
 
     if (!response.ok) {
       // Received a response with non-2xx statusCode
-      await this.handleFailedResponse(response, apiUrl);
+      await this.handleFailedResponse(response, apiUrl, method);
     }
 
     // Successful response
-    await Logger.info(`Response from ${method} ${apiUrl}: ${response.status}`);
+    Logger.info(`Response from ${method} ${apiUrl}: ${response.status}`);
     return { response, apiUrl };
   }
 

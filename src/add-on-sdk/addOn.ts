@@ -16,7 +16,10 @@ import Mock from 'mock-http';
 import Superagent from 'superagent';
 import Url from 'url';
 
-import { getAgent } from '../agent';
+// The add-on SDK talks to the Fusebit platform (storage, function, identity endpoints), not tenant destinations, so it
+// uses the unguarded internal agent.
+import { getInternalAgent } from '../agent';
+import { initMetrics, register } from '../metrics';
 import { LogContextKey } from '../models';
 
 let logger: (message?: any, ...optionalParams: any[]) => void = console.log;
@@ -29,18 +32,14 @@ export function debug(...args: any[]) {
 
 function validateReturnTo(ctx: IntegrationContext) {
   if (ctx.query?.returnTo) {
-    const validReturnTo = (
-      ctx.configuration.fusebit_allowed_return_to || ''
-    ).split(',');
+    const validReturnTo = (ctx.configuration.fusebit_allowed_return_to || '').split(',');
     const match = validReturnTo.find(allowed => {
       if (allowed === ctx.query?.returnTo) {
         return true;
       }
       if (
         allowed[allowed.length - 1] === '*' &&
-        ctx.query?.returnTo.indexOf(
-          allowed.substring(0, allowed.length - 1)
-        ) === 0
+        ctx.query?.returnTo.indexOf(allowed.substring(0, allowed.length - 1)) === 0
       ) {
         return true;
       }
@@ -55,16 +54,11 @@ function validateReturnTo(ctx: IntegrationContext) {
   }
 }
 
-export const createSettingsManager = (
-  configure: FunctionConfiguration,
-  disableDebug?: boolean
-) => {
+export const createSettingsManager = (configure: FunctionConfiguration, disableDebug?: boolean) => {
   const { states, initialState } = configure;
   return async (ctx: IntegrationContext): Promise<FunctionState> => {
     if (!disableDebug) {
-      debug(
-        'DEBUGGING ENABLED. To disable debugging information, comment out the `debug` configuration setting.'
-      );
+      debug('DEBUGGING ENABLED. To disable debugging information, comment out the `debug` configuration setting.');
       debug('NEW REQUEST', ctx.method, ctx.url, ctx.query, ctx.body);
     }
     try {
@@ -100,9 +94,7 @@ export const createSettingsManager = (
 export const createLifecycleManager = (options: LifeCycleManagerOptions) => {
   const { configure, install, uninstall } = options;
   return async (ctx: IntegrationContext) => {
-    debug(
-      'DEBUGGING ENABLED. To disable debugging information, comment out the `debug` configuration setting.'
-    );
+    debug('DEBUGGING ENABLED. To disable debugging information, comment out the `debug` configuration setting.');
     debug('NEW REQUEST', ctx.method, ctx.url, ctx.query, ctx.body);
     const pathSegments = Url.parse(ctx.url!).pathname!.split('/');
     let lastSegment;
@@ -143,11 +135,9 @@ export const createLifecycleManager = (options: LifeCycleManagerOptions) => {
   };
 };
 
-export const serializeState = (state: any): string =>
-  Buffer.from(JSON.stringify(state)).toString('base64');
+export const serializeState = (state: any): string => Buffer.from(JSON.stringify(state)).toString('base64');
 
-export const deserializeState = <TData>(state: string): TData =>
-  JSON.parse(Buffer.from(state, 'base64').toString());
+export const deserializeState = <TData>(state: string): TData => JSON.parse(Buffer.from(state, 'base64').toString());
 
 export const getInputs = (
   ctx: IntegrationContext,
@@ -155,9 +145,7 @@ export const getInputs = (
 ): [FunctionState, FunctionData] => {
   let data: FunctionData;
   try {
-    data = ctx.query?.data
-      ? deserializeState<FunctionData>(ctx.query.data as string)
-      : {};
+    data = ctx.query?.data ? deserializeState<FunctionData>(ctx.query.data as string) : {};
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
   } catch (e) {
     throw { status: 400, message: `Malformed 'data' parameter` };
@@ -170,14 +158,7 @@ export const getInputs = (
         message: `State consistency error. Initial configuration state is not specified, and 'state' parameter is missing.`
       };
     }
-    [
-      'baseUrl',
-      'accountId',
-      'subscriptionId',
-      'boundaryId',
-      'functionId',
-      'templateName'
-    ].forEach(p => {
+    ['baseUrl', 'accountId', 'subscriptionId', 'boundaryId', 'functionId', 'templateName'].forEach(p => {
       if (!data[p]) {
         throw {
           status: 400,
@@ -210,35 +191,22 @@ export const getInputs = (
   }
 };
 
-export const completeWithSuccess = (
-  state: FunctionState,
-  data: FunctionData
-) => {
+export const completeWithSuccess = (state: FunctionState, data: FunctionData) => {
   const location =
-    `${state.returnTo}?status=success&data=${encodeURIComponent(
-      serializeState(data)
-    )}` +
-    (state.returnToState
-      ? `&state=${encodeURIComponent(state.returnToState)}`
-      : '');
+    `${state.returnTo}?status=success&data=${encodeURIComponent(serializeState(data))}` +
+    (state.returnToState ? `&state=${encodeURIComponent(state.returnToState)}` : '');
   return { status: 302, headers: { location } };
 };
 
-export const completeWithError = (
-  ctx: IntegrationContext,
-  error: FunctionError
-) => {
+export const completeWithError = (ctx: IntegrationContext, error: FunctionError) => {
   debug('COMPLETE WITH ERROR', error);
   const returnTo = (error.state && error.state.returnTo) || ctx.query?.returnTo;
-  const state =
-    (error.state && error.state.returnToState) ||
-    (ctx.query?.returnTo && ctx.query.state);
+  const state = (error.state && error.state.returnToState) || (ctx.query?.returnTo && ctx.query.state);
   const body = { status: error.status || 500, message: error.message };
   if (returnTo) {
     const location =
-      `${returnTo}?status=error&data=${encodeURIComponent(
-        serializeState(body)
-      )}` + (state ? `&state=${encodeURIComponent(state as string)}` : '');
+      `${returnTo}?status=error&data=${encodeURIComponent(serializeState(body))}` +
+      (state ? `&state=${encodeURIComponent(state as string)}` : '');
     return { status: 302, headers: { location } };
   } else {
     return { status: body.status, body };
@@ -258,27 +226,21 @@ export const redirect = (
 ) => {
   state.configurationState = nextConfigurationState;
 
-  const location = `${redirectUrl}?returnTo=${`${getSelfUrl(
-    ctx
-  )}/configure`}&state=${encodeURIComponent(
+  const location = `${redirectUrl}?returnTo=${`${getSelfUrl(ctx)}/configure`}&state=${encodeURIComponent(
     serializeState(state)
   )}&data=${encodeURIComponent(serializeState(data))}`;
 
   return { status: 302, headers: { location } };
 };
 
-export const createFunction = async (
-  ctx: IntegrationContext,
-  functionSpecification: object,
-  accessToken: string
-) => {
+export const createFunction = async (ctx: IntegrationContext, functionSpecification: object, accessToken: string) => {
   let functionCreated = false;
   const accessTokenHeader = `Bearer ${accessToken}`;
   try {
     // Create the function
     const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}`;
     let response = await Superagent.put(url)
-      .agent(getAgent(url))
+      .agent(getInternalAgent(url))
       .set('Authorization', accessTokenHeader)
       .send(functionSpecification);
     functionCreated = true;
@@ -287,18 +249,13 @@ export const createFunction = async (
     let attempts = 15;
     while (response.status === 201 && attempts > 0) {
       const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}/build/${response.body.buildId}`;
-      response = await Superagent.get(url)
-        .agent(getAgent(url))
-        .set('Authorization', accessTokenHeader);
+      response = await Superagent.get(url).agent(getInternalAgent(url)).set('Authorization', accessTokenHeader);
       if (response.status === 200) {
         if (response.body.status === 'success') {
           break;
         } else {
           throw new Error(
-            `Failure creating function: ${
-              (response.body.error && response.body.error.message) ||
-              'Unknown error'
-            }`
+            `Failure creating function: ${(response.body.error && response.body.error.message) || 'Unknown error'}`
           );
         }
       }
@@ -309,17 +266,12 @@ export const createFunction = async (
       throw new Error(`Timeout creating function`);
     }
 
-    if (
-      response.status === 204 ||
-      (response.body && response.body.status === 'success')
-    ) {
+    if (response.status === 204 || (response.body && response.body.status === 'success')) {
       if (response.body && response.body.location) {
         return response.body.location;
       } else {
         const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${ctx.body.boundaryId}/function/${ctx.body.functionId}/location`;
-        response = await Superagent.get(url)
-          .agent(getAgent(url))
-          .set('Authorization', accessTokenHeader);
+        response = await Superagent.get(url).agent(getInternalAgent(url)).set('Authorization', accessTokenHeader);
         if (response.body && response.body.location) {
           return response.body.location;
         }
@@ -345,13 +297,11 @@ export const deleteFunction = async (
   boundaryId?: string,
   functionId?: string
 ) => {
-  const url = `${ctx.body.baseUrl}/v1/account/${
-    ctx.body.accountId
-  }/subscription/${ctx.body.subscriptionId}/boundary/${
+  const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${
     boundaryId || ctx.body.boundaryId
   }/function/${functionId || ctx.body.functionId}`;
   await Superagent.delete(url)
-    .agent(getAgent(url))
+    .agent(getInternalAgent(url))
     .set('Authorization', `Bearer ${accessToken}`)
     .ok(res => res.status === 204 || res.status === 404);
 };
@@ -362,14 +312,10 @@ export const getFunctionDefinition = async (
   boundaryId: string,
   functionId: string
 ) => {
-  const url = `${ctx.body.baseUrl}/v1/account/${
-    ctx.body.accountId
-  }/subscription/${ctx.body.subscriptionId}/boundary/${
+  const url = `${ctx.body.baseUrl}/v1/account/${ctx.body.accountId}/subscription/${ctx.body.subscriptionId}/boundary/${
     boundaryId || ctx.body.boundaryId
   }/function/${functionId || ctx.body.functionId}`;
-  const response = await Superagent.get(url)
-    .agent(getAgent(url))
-    .set('Authorization', `Bearer ${accessToken}`);
+  const response = await Superagent.get(url).agent(getInternalAgent(url)).set('Authorization', `Bearer ${accessToken}`);
 
   return response.body;
 };
@@ -377,48 +323,34 @@ export const getFunctionDefinition = async (
 const removeLeadingSlash = (s: string) => s.replace(/^\/(.+)$/, '$1');
 const removeTrailingSlash = (s: string) => s.replace(/^(.+)\/$/, '$1');
 
-export const createStorageClient = async (
-  ctx: IntegrationContext,
-  accessToken: string,
-  storageIdPrefix: string
-) => {
-  storageIdPrefix = storageIdPrefix
-    ? removeLeadingSlash(removeTrailingSlash(storageIdPrefix))
-    : '';
+export const createStorageClient = async (ctx: IntegrationContext, accessToken: string, storageIdPrefix: string) => {
+  storageIdPrefix = storageIdPrefix ? removeLeadingSlash(removeTrailingSlash(storageIdPrefix)) : '';
   const functionUrl = Url.parse(ctx.baseUrl!);
   const storageBase =
     ctx?.fusebit?.storageServiceUrl ??
     `${functionUrl.protocol}//${functionUrl.host}/v1/account/${ctx.accountId}/subscription/${ctx.subscriptionId}`;
-  const storageBaseUrl = `${storageBase}/storage${
-    storageIdPrefix ? '/' + storageIdPrefix : ''
-  }`;
+  const storageBaseUrl = `${storageBase}/storage${storageIdPrefix ? '/' + storageIdPrefix : ''}`;
 
   const getUrl = (storageSubId: string) => {
-    storageSubId = storageSubId
-      ? removeTrailingSlash(removeLeadingSlash(storageSubId))
-      : '';
+    storageSubId = storageSubId ? removeTrailingSlash(removeLeadingSlash(storageSubId)) : '';
     return `${storageBaseUrl}${storageSubId ? '/' + storageSubId : ''}`;
   };
 
   const storageClient = {
     get: async function (storageSubId: string) {
-      storageSubId = storageSubId
-        ? removeTrailingSlash(removeLeadingSlash(storageSubId))
-        : '';
+      storageSubId = storageSubId ? removeTrailingSlash(removeLeadingSlash(storageSubId)) : '';
       if (!storageSubId && !storageIdPrefix) {
         return undefined;
       }
       const url = getUrl(storageSubId);
       const response = await Superagent.get(url)
-        .agent(getAgent(url))
+        .agent(getInternalAgent(url))
         .set('Authorization', `Bearer ${accessToken}`)
         .ok(res => res.status < 300 || res.status === 404);
       return response.status === 404 ? undefined : response.body;
     },
     put: async function (data: any, storageSubId: string) {
-      storageSubId = storageSubId
-        ? removeTrailingSlash(removeLeadingSlash(storageSubId))
-        : '';
+      storageSubId = storageSubId ? removeTrailingSlash(removeLeadingSlash(storageSubId)) : '';
       if (!storageSubId && !storageIdPrefix) {
         throw new Error(
           'Storage objects cannot be stored at the root of the hierarchy. Specify a storageSubId when calling the `put` method, or a storageIdPrefix when creating the storage client.'
@@ -426,19 +358,13 @@ export const createStorageClient = async (
       }
       const url = getUrl(storageSubId);
       const response = await Superagent.put(url)
-        .agent(getAgent(url))
+        .agent(getInternalAgent(url))
         .set('Authorization', `Bearer ${accessToken}`)
         .send(data);
       return response.body;
     },
-    delete: async function (
-      storageSubId: string,
-      recursive: boolean,
-      forceRecursive: boolean
-    ) {
-      storageSubId = storageSubId
-        ? removeLeadingSlash(removeTrailingSlash(storageSubId))
-        : '';
+    delete: async function (storageSubId: string, recursive: boolean, forceRecursive: boolean) {
+      storageSubId = storageSubId ? removeLeadingSlash(removeTrailingSlash(storageSubId)) : '';
       if (!storageSubId && !storageIdPrefix && recursive && !forceRecursive) {
         throw new Error(
           'You are attempting to recursively delete all storage objects in the Fusebit subscription. If this is your intent, please pass "true" as the third parameter in the call to delete(storageSubId, recursive, forceRecursive).'
@@ -446,22 +372,19 @@ export const createStorageClient = async (
       }
       const url = `${getUrl(storageSubId)}${recursive ? '/*' : ''}`;
       await Superagent.delete(url)
-        .agent(getAgent(url))
+        .agent(getInternalAgent(url))
         .set('Authorization', `Bearer ${accessToken}`)
         .ok(res => res.status === 404 || res.status === 204);
       return;
     },
-    list: async function (
-      storageSubId: string,
-      { count, next } = {} as ListStorageOptions
-    ) {
+    list: async function (storageSubId: string, { count, next } = {} as ListStorageOptions) {
       const params = {
         count: count === undefined || isNaN(count) ? undefined : count,
         next: typeof next === 'string' ? next : undefined
       };
       const url = `${getUrl(storageSubId)}/*`;
       const response = await Superagent.get(url)
-        .agent(getAgent(url))
+        .agent(getInternalAgent(url))
         .query(params)
         .set('Authorization', `Bearer ${accessToken}`);
       return response.body;
@@ -476,14 +399,8 @@ export const createFusebitFunctionFromExpress = (
   { disableStorageClient } = {} as { [key: string]: any }
 ) => {
   // See https://github.com/fusebit/samples/blob/master/express/index.js#L6
-  Object.setPrototypeOf(
-    Object.getPrototypeOf(Object.getPrototypeOf(app.response)),
-    Mock.Response.prototype
-  );
-  Object.setPrototypeOf(
-    Object.getPrototypeOf(Object.getPrototypeOf(app.request)),
-    Mock.Request.prototype
-  );
+  Object.setPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf(app.response)), Mock.Response.prototype);
+  Object.setPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf(app.request)), Mock.Request.prototype);
 
   return async (ctx: IntegrationContext) => {
     if (ctx.logger) {
@@ -496,9 +413,7 @@ export const createFusebitFunctionFromExpress = (
       ctx.storage = await createStorageClient(
         ctx,
         ctx.fusebit.functionAccessToken,
-        `boundary/${ctx.boundaryId}/function/${
-          process.env.storage_source ?? ctx.functionId
-        }/root`
+        `boundary/${ctx.boundaryId}/function/${process.env.storage_source ?? ctx.functionId}/root`
       );
     }
 
@@ -536,9 +451,7 @@ export const createFusebitFunctionFromExpress = (
               return;
             }
             responseFinished = true;
-            const responseBody = (
-              res._internal.buffer || Buffer.from('')
-            ).toString('utf8');
+            const responseBody = (res._internal.buffer || Buffer.from('')).toString('utf8');
             debug('HTTP RESPONSE', res.statusCode, responseBody);
             process.nextTick(() => {
               resolve({
@@ -565,19 +478,28 @@ export const createFusebitFunctionFromExpress = (
  * to handle incoming request to the /invoke endpoint.  Invoke requests are
  * forwarded to the Express app created and configured by the integration.
  */
-export const createHttpServerApp = (
-  integrationApp: express.Express
-): express.Express => {
+export const createHttpServerApp = (integrationApp: express.Express): express.Express => {
   const app = express();
   app.use(bodyParser.json());
 
+  // Initialize default Prometheus metrics. initMetrics() is idempotent.
+  initMetrics();
+
   // Readiness endpoint.
-  app.get(
-    '/health/readiness',
-    async (req: express.Request, res: express.Response) => {
-      res.status(200).send('OK');
+  app.get('/health/readiness', async (req: express.Request, res: express.Response) => {
+    res.status(200).send('OK');
+  });
+
+  // Prometheus metrics endpoint. Registered on the outer Express app so that
+  // scrapes from outside the Fusebit /invoke envelope can reach it.
+  app.get('/metrics', async (req: express.Request, res: express.Response) => {
+    try {
+      res.set('Content-Type', register.contentType);
+      res.end(await register.metrics());
+    } catch {
+      res.status(500).end();
     }
-  );
+  });
 
   // Main entry point to the integration.
   app.post('/invoke', async (req: express.Request, res: express.Response) => {
@@ -585,15 +507,9 @@ export const createHttpServerApp = (
   });
 
   // Catch 404 and forward to error handler
-  app.use(
-    (
-      eq: express.Request,
-      res: express.Response,
-      next: express.NextFunction
-    ) => {
-      next(createHttpError(StatusCodes.NOT_FOUND));
-    }
-  );
+  app.use((eq: express.Request, res: express.Response, next: express.NextFunction) => {
+    next(createHttpError(StatusCodes.NOT_FOUND));
+  });
 
   // error handler. 4th param required, see 'Error-handling middleware'
   // section: https://expressjs.com/en/guide/using-middleware.html
@@ -603,22 +519,20 @@ export const createHttpServerApp = (
     res.locals.message = err.message;
     res.locals.error = req.app.get('env') === 'development' ? err : {};
 
-    res
-      .status(err.status || err.code || StatusCodes.INTERNAL_SERVER_ERROR)
-      .json({
-        error: err.message,
-        extendedError: {
-          ...err,
-          [LogContextKey.StackTrace]: err.stack
-        }
-      });
+    res.status(err.status || err.code || StatusCodes.INTERNAL_SERVER_ERROR).json({
+      error: err.message,
+      extendedError: {
+        ...err,
+        [LogContextKey.StackTrace]: err.stack
+      }
+    });
   });
 
   return app;
 };
 
 /**
- * Forwards a request recieved via the /invoke endpoint to the express
+ * Forwards a request received via the /invoke endpoint to the express
  * app configured by an integration.
  */
 const forwardIntegrationRequest = async (
@@ -638,9 +552,7 @@ const forwardIntegrationRequest = async (
     ctx.storage = await createStorageClient(
       ctx,
       ctx.fusebit.functionAccessToken,
-      `boundary/${ctx.boundaryId}/function/${
-        process.env.storage_source ?? ctx.functionId
-      }/root`
+      `boundary/${ctx.boundaryId}/function/${process.env.storage_source ?? ctx.functionId}/root`
     );
   }
 

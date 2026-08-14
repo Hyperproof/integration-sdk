@@ -26,6 +26,14 @@ export interface ICredentialsMetadata {
   fields: ICredentialField[];
 }
 
+export interface IAuthorizedUser<
+  TUserProfile extends object = object,
+  TCredentials extends CustomAuthCredentials | string = CustomAuthCredentials | string
+> {
+  profile?: TUserProfile;
+  credentials: TCredentials;
+}
+
 /**
  * Type of the object that is used to store the access keys, API keys,
  * etc. that are used to authenticate in a custom authentication Hypersync.
@@ -39,13 +47,23 @@ export interface IAuthorizationConfigBase {
   appId?: string;
   authorizationType: AuthorizationType;
   authUrl?: string;
+  authToken?: string;
   outboundOnly: boolean;
   vendorPrefix: string;
   credentialsMetadata?: ICredentialsMetadata;
+  externalUserId?: string;
+  tenantConfig?: Record<string, any>;
+  oauthVariants?: IOAuthVariant[];
 }
 
 export interface IAuthorizationConfig extends IAuthorizationConfigBase {
   hyperproofClientId: string;
   hyperproofRedirectUrl: string;
   hyperproofScopes: string[];
+}
+
+export interface IOAuthVariant {
+  id: string;
+  title: string;
+  description: string;
 }

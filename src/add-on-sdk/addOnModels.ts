@@ -45,17 +45,10 @@ export interface StorageClient {
   put(data: any, storageSubId: string): Promise<StorageDataObject>;
 
   // https://fusebit.io/docs/reference/fusebit-http-api/#operation/deleteStorage
-  delete(
-    storageSubId?: string,
-    recursive?: boolean,
-    forceRecursive?: boolean
-  ): Promise<void>;
+  delete(storageSubId?: string, recursive?: boolean, forceRecursive?: boolean): Promise<void>;
 
   // https://fusebit.io/docs/reference/fusebit-http-api/#operation/getStorageList
-  list(
-    storageSubId: string,
-    options?: ListStorageOptions
-  ): Promise<ListStorageResult>;
+  list(storageSubId: string, options?: ListStorageOptions): Promise<ListStorageResult>;
 }
 
 export interface IResourceAction {
@@ -120,11 +113,7 @@ export interface FunctionError {
 export interface FunctionConfiguration {
   initialState: string;
   states: {
-    [state: string]: (
-      ctx: IntegrationContext,
-      state: FunctionState,
-      data: FunctionData
-    ) => Promise<FunctionState>;
+    [state: string]: (ctx: IntegrationContext, state: FunctionState, data: FunctionData) => Promise<FunctionState>;
   };
 }
 

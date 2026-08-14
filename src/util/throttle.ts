@@ -1,3 +1,5 @@
+import { getErrorCode, getHttpStatus, NETWORK_ERROR_CODES, RATE_LIMIT_STATUS_CODES } from './errorClassification';
+
 import createHttpError from 'http-errors';
 import { StatusCodes } from 'http-status-codes';
 
@@ -36,10 +38,14 @@ interface IRequestSender<RequestType, ResponseType> {
  * @property {number} totalTries The total number of times this `ThrottleManager` has been reused.
  * @property {number} maxTries The maximum number of tries this manager should execute before giving
  *           up. Note: this functionality is ultimately handled by the Job Engine.
+ * @property {number} maxBackoffDelay The maximum delay in seconds for jittered exponential backoff
+ *           when no server-suggested delay is available. Connectors with longer rate-limit windows
+ *           (e.g. hourly resets) may want a higher value than the default.
  */
 export interface IThrottleModel {
   totalTries?: number;
   maxTries?: number;
+  maxBackoffDelay?: number;
 }
 
 /**
@@ -53,6 +59,7 @@ export class ThrottleManager<RequestType, ResponseType> {
   private _sendRequest: IRequestSender<RequestType, ResponseType>;
   private _maxTries: number;
   private _totalTries: number;
+  private _maxBackoffDelay: number;
 
   /**
    * Construct a ThrottleManager, optionally continuing to track the number of re-instantiations this
@@ -64,11 +71,13 @@ export class ThrottleManager<RequestType, ResponseType> {
     sendRequest: IRequestSender<RequestType, ResponseType>,
     {
       maxTries = COMMON_MAX_RETRIES,
-      totalTries = 0
+      totalTries = 0,
+      maxBackoffDelay = DEFAULT_MAX_BACKOFF_DELAY
     }: IThrottleModel | undefined = {}
   ) {
     this._sendRequest = sendRequest;
     this._maxTries = maxTries;
+    this._maxBackoffDelay = maxBackoffDelay;
     this._totalTries = totalTries + 1;
     if (this._totalTries > this._maxTries)
       throw createHttpError(
@@ -84,6 +93,10 @@ export class ThrottleManager<RequestType, ResponseType> {
 
   get totalTries() {
     return this._totalTries;
+  }
+
+  get maxBackoffDelay() {
+    return this._maxBackoffDelay;
   }
 
   /**
@@ -104,7 +117,8 @@ export class ThrottleManager<RequestType, ResponseType> {
   toModel(): IThrottleModel {
     return {
       totalTries: this._totalTries,
-      maxTries: this._maxTries
+      maxTries: this._maxTries,
+      maxBackoffDelay: this._maxBackoffDelay
     };
   }
 
@@ -114,10 +128,7 @@ export class ThrottleManager<RequestType, ResponseType> {
    * @throws {ExternalAPIError} Any exception thrown by `_sendRequest()` is wrapped with an
    *         `ExternalAPIError` instance and propagated.
    */
-  async retrieve(
-    request: RequestType,
-    logger?: (response: any) => void
-  ): Promise<ResponseType> {
+  async retrieve(request: RequestType, logger?: (response: any) => void): Promise<ResponseType> {
     try {
       const response = await this._sendRequest(request);
       if (logger) {
@@ -129,9 +140,7 @@ export class ThrottleManager<RequestType, ResponseType> {
     }
   }
 
-  _makeError<ErrorType extends FetchLikeError>(
-    error: ErrorType
-  ): ExternalAPIError<ErrorType> {
+  _makeError<ErrorType extends FetchLikeError>(error: ErrorType): ExternalAPIError<ErrorType> {
     return new ExternalAPIError(this, error);
   }
 }
@@ -154,11 +163,7 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
   /** @returns The response code extracted from the original error, or undefined if it couldn't be
    * found. */
   get responseCode(): number | undefined {
-    return findAttr(
-      ['status', 'code', 'responseCode'],
-      this.error,
-      this.error.response
-    );
+    return findAttr(['status', 'code', 'responseCode'], this.error, this.error.response);
   }
 
   /**
@@ -173,22 +178,29 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
   }
 
   get message() {
-    return (
-      this.error?.message ||
-      `Unknown ExternalAPIError: ${this.responseCode || 'unknown status code'}`
-    );
+    return this.error?.message || `Unknown ExternalAPIError: ${this.responseCode || 'unknown status code'}`;
   }
 
+  // Determines whether the error is a candidate for automatic retry. Uses the
+  // shared error classification constants from errorClassification.ts so that
+  // the set of retryable error codes/statuses is maintained in one place.
+  //
+  // Previously this method had inline arrays with only 3 network error codes
+  // (ECONNRESET, ECONNREFUSED, ETIMEDOUT) and 3 HTTP status codes (429, 503, 504).
+  // Now it uses the full NETWORK_ERROR_CODES set (12 codes) and
+  // RATE_LIMIT_STATUS_CODES set (408, 429, 502, 503, 504) for broader coverage.
   canRetry(): boolean {
-    return !!(
-      [
-        StatusCodes.TOO_MANY_REQUESTS,
-        StatusCodes.GATEWAY_TIMEOUT,
-        StatusCodes.SERVICE_UNAVAILABLE
-      ].includes(this.responseCode ?? 0) ||
+    const legacyStatus =
+      this.responseCode !== undefined && Number.isFinite(Number(this.responseCode))
+        ? Number(this.responseCode)
+        : undefined;
+    const status = getHttpStatus(this.error) ?? legacyStatus;
+    const code = getErrorCode(this.error);
+
+    return (
+      (status !== undefined && RATE_LIMIT_STATUS_CODES.has(status)) ||
       /rate limit/i.test(this.message) ||
-      (this.error?.code &&
-        ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT'].includes(this.error.code))
+      (code !== undefined && NETWORK_ERROR_CODES.has(code))
     );
   }
 
@@ -204,18 +216,19 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
    */
   async computeRetry(): Promise<IRetryResponse> {
     let delay;
+    const maxBackoff = this.throttleManager.maxBackoffDelay;
     const headers = this._findHeadersInError();
     if (headers) {
       const suggestedDelay = await extractDelayFromResponseHeaders(headers);
-      if (suggestedDelay) {
-        delay = suggestedDelay + jitteredBackoff(1);
+      if (suggestedDelay !== undefined) {
+        delay = suggestedDelay + jitteredBackoff(1, undefined, maxBackoff);
       }
     }
-    if (!delay) {
+    if (delay === undefined) {
       if (this.canRetry()) {
-        delay = jitteredBackoff(this.throttleManager.totalTries);
+        delay = jitteredBackoff(this.throttleManager.totalTries, undefined, maxBackoff);
       } else {
-        await Logger.error(
+        Logger.error(
           'ExternalAPIError does not appear to have been caused by a rate limit or intermittent error. Propagating the original error.',
           this.error
         );
@@ -230,7 +243,7 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
       maxRetry: this.throttleManager.maxTries,
       delay
     };
-    await Logger.info(
+    Logger.info(
       `There appears to be a failure due to a rate limit or intermittent error. Suggesting retry response: ${JSON.stringify(
         retryInfo
       )}`
@@ -257,17 +270,8 @@ export class ExternalAPIError<RequestError extends FetchLikeError> {
  * @param maxValue The maximum value that can be returned.
  * @returns The minimum amount of time in seconds to wait before re-sending a request.
  */
-const jitteredBackoff = (
-  triesSoFar: number,
-  baseDelay = 8,
-  maxValue = 64
-): number =>
-  Math.min(
-    Math.ceil(
-      baseDelay + Math.random() * (baseDelay * 2 ** triesSoFar - baseDelay)
-    ),
-    maxValue
-  );
+const jitteredBackoff = (triesSoFar: number, baseDelay = 8, maxValue = 64): number =>
+  Math.min(Math.ceil(baseDelay + Math.random() * (baseDelay * 2 ** triesSoFar - baseDelay)), maxValue);
 
 /**
  * @param possibleNames The set of names, in order of precedence, under which the desired data
@@ -277,10 +281,7 @@ const jitteredBackoff = (
  * @returns The first non-undefined attribute with one of the possible names found in one
  *          of the targets, or `undefined` if no such attribute was found.
  */
-export const findAttr = (
-  possibleNames: (string | undefined)[],
-  ...targets: any[]
-) => {
+export const findAttr = (possibleNames: (string | undefined)[], ...targets: any[]) => {
   const lowercaseNames = possibleNames.map(name => name?.toLowerCase());
   for (const target of targets) {
     if (target) {
@@ -319,33 +320,27 @@ export const findAttr = (
  * @returns The number of seconds the server suggests we wait before trying again, or `undefined` if
  *          a suggestion could not be determined from the headers.
  */
-const extractDelayFromResponseHeaders = async (
-  headers: object
-): Promise<number | undefined> => {
+const extractDelayFromResponseHeaders = async (headers: object): Promise<number | undefined> => {
   try {
     const retryAfter = findAttr(['retry-after'], headers);
     if (retryAfter) {
-      await Logger.info(`Got value from Retry-After header. ${retryAfter}`);
-      return Number(retryAfter);
+      Logger.info(`Got value from Retry-After header. ${retryAfter}`);
+      // Retry-After can be either seconds (numeric) or an HTTP-date (RFC 7231)
+      const numericValue = Number(retryAfter);
+      if (Number.isFinite(numericValue) && numericValue >= 0) {
+        return numericValue;
+      }
+      const dateValue = Date.parse(retryAfter);
+      if (!isNaN(dateValue)) {
+        return Math.max(0, (dateValue - Date.now()) / 1000);
+      }
     }
-    const rateLimitRemaining = findAttr(
-      ['x-ratelimit-remaining', 'x-rate-limit-remaining'],
-      headers
-    );
+    const rateLimitRemaining = findAttr(['x-ratelimit-remaining', 'x-rate-limit-remaining'], headers);
     if (rateLimitRemaining !== '' && Number(rateLimitRemaining) <= 0) {
-      const rateLimitReset = findAttr(
-        ['x-ratelimit-reset', 'x-rate-limit-reset', 'x-ratelimit-retryafter'],
-        headers
-      );
+      const rateLimitReset = findAttr(['x-ratelimit-reset', 'x-rate-limit-reset', 'x-ratelimit-retryafter'], headers);
       if (rateLimitReset) {
-        await Logger.info(
-          `Got value from X-RateLimit headers. ${rateLimitReset}`
-        );
-        return Math.max(
-          0,
-          (new Date(Number(rateLimitReset) * 1000).getTime() - Date.now()) /
-            1000
-        );
+        Logger.info(`Got value from X-RateLimit headers. ${rateLimitReset}`);
+        return Math.max(0, (new Date(Number(rateLimitReset) * 1000).getTime() - Date.now()) / 1000);
       }
     }
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -355,3 +350,4 @@ const extractDelayFromResponseHeaders = async (
 };
 
 const COMMON_MAX_RETRIES = 5;
+const DEFAULT_MAX_BACKOFF_DELAY = 64;
